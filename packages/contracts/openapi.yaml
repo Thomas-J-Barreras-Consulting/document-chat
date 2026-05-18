@@ -1,0 +1,3228 @@
+openapi: 3.1.0
+
+info:
+  title: Knowledge Graph Document Chat API
+  version: 0.1.0
+  summary: API-first contract for the document Q&A and knowledge graph system.
+  description: |
+    Source-of-truth REST contract for the document-chat backend.
+
+    ## Layout
+
+    - **Tier 0** (public, unauthenticated): `/health`, `/version`.
+    - **Tier 1** (public, JWT): identity, documents, chunks, citations, chats, messages.
+    - **Tier 2** (private): workspaces, billing, audit, admin.
+    - **Tier 3** (private): document lifecycle, version graph, supersession, time-travel.
+    - **Tier 4** (private): knowledge graph triples, entities, ontology, SPARQL.
+
+    The public Apache-2.0 starter (`knowledge-graph-starter`) ships only the
+    Tier 0–1 surface. The private fork adds Tier 2–4 paths and schemas. Both
+    share the conventions declared in this document.
+
+    ## Authentication
+
+    Bearer auth using Supabase-issued JWTs is the default. The token's
+    `app_metadata.workspace_id` claim is the **only** source of tenant context
+    for RLS; no header or body parameter may override it. Tier 0 endpoints and
+    the Stripe webhook override `security: []`.
+
+    ## Errors
+
+    Non-2xx responses use `application/problem+json` (RFC 9457). The `Problem`
+    schema is shared across every error response. RLS-hidden resources return
+    `404`; `403` is reserved for role-denied (e.g., member hitting admin
+    endpoints).
+
+    ## Pagination
+
+    Time-ordered unbounded lists use opaque **cursor** pagination
+    (`?cursor=&limit=`, default 20, max 100). Bounded admin lists use **offset**
+    pagination (`?page=&page_size=`). Cursors are opaque strings; clients must
+    not parse them.
+
+    ## Streaming
+
+    `POST /chats/{chat_id}/messages` and `GET /documents/{document_id}/ingestion-events`
+    content-negotiate on `Accept`. `text/event-stream` returns SSE; otherwise
+    JSON. The chat SSE event payloads are described in the sibling
+    `chat-events.schema.json`.
+
+    ## Custom methods
+
+    Verb-style actions follow Google AIP-136 colon syntax:
+    `POST /documents/{document_id}:reprocess`, `POST /documents/{a}:supersede`,
+    `POST /kg/triples/{id}:retract`, etc.
+
+    ## Versioning
+
+    Semver in `info.version`; no URL version prefix. Breaking changes bump the
+    major and ship with a `CHANGELOG.md` migration note. Each operation carries
+    `x-api-stability: stable | beta | experimental` and `x-tier: 0..4`.
+
+  contact:
+    name: Knowledge Graph Document Chat
+    url: https://github.com/chrisbarreras/document-chat
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  x-api-stability: experimental
+
+servers:
+  - url: https://api.example.com
+    description: Production
+  - url: https://{previewId}.preview.example.com
+    description: Vercel PR preview
+    variables:
+      previewId:
+        default: pr-1
+  - url: http://localhost:3000
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: system
+    description: Tier 0 — public, unauthenticated. Liveness and build info.
+  - name: identity
+    description: Tier 1 — current authenticated user.
+  - name: documents
+    description: Tier 1 — document CRUD, signed-URL uploads, ingestion, reprocess.
+  - name: chunks
+    description: Tier 1 — chunk reads for debug, eval, and citation hydration.
+  - name: citations
+    description: Tier 1 — batch citation resolution.
+  - name: chats
+    description: Tier 1 — chat sessions and streaming messages (SSE).
+  - name: workspaces
+    description: Tier 2 — workspace settings and member management.
+  - name: billing
+    description: Tier 2 — Stripe checkout, portal, usage, and webhook.
+  - name: audit
+    description: Tier 2 — audit-log query and export.
+  - name: admin
+    description: Tier 2 — admin dashboard rollups.
+  - name: lifecycle
+    description: Tier 3 — version graph, supersession, transitions, time-travel.
+  - name: kg
+    description: Tier 4 — knowledge graph triples, entities, ontology, SPARQL.
+
+paths:
+
+  # ============================================================
+  # Tier 0 — system
+  # ============================================================
+
+  /health:
+    get:
+      tags: [system]
+      summary: Liveness probe with per-dependency checks.
+      description: |
+        Returns 200 even when individual dependencies report `degraded`. Only
+        full-system failure returns 503. Tier 2+ adds `langfuse` and `stripe`
+        checks; Tier 4 adds `sparql_store`.
+      operationId: getHealth
+      security: []
+      x-api-stability: stable
+      x-tier: 0
+      responses:
+        '200':
+          description: Service reachable; per-dependency status in body.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /version:
+    get:
+      tags: [system]
+      summary: Build version, git SHA, spec version, environment.
+      operationId: getVersion
+      security: []
+      x-api-stability: stable
+      x-tier: 0
+      responses:
+        '200':
+          description: Version metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+
+  # ============================================================
+  # Tier 1 — identity
+  # ============================================================
+
+  /me:
+    get:
+      tags: [identity]
+      summary: Current user profile and (single, Tier 1) workspace.
+      operationId: getMe
+      x-api-stability: stable
+      x-tier: 1
+      responses:
+        '200':
+          description: Authenticated user profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  # ============================================================
+  # Tier 1 — documents
+  # ============================================================
+
+  /documents:
+    get:
+      tags: [documents]
+      summary: List documents in the current workspace.
+      description: |
+        Supports filter (`status`, `q` full-text on title), sort (`name |
+        uploaded_at | status`, asc/desc), cursor pagination. Tier 3 adds the
+        `as_of_date` filter; `include_retired` is admin-only when present.
+      operationId: listDocuments
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/DocumentStatus' }
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [name, uploaded_at, status]
+            default: uploaded_at
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: as_of_date
+          in: query
+          description: Tier 3+. Time-travel filter (RFC 3339 date).
+          schema: { type: string, format: date }
+          x-tier: 3
+        - name: include_retired
+          in: query
+          description: Tier 3+, admin-only.
+          schema: { type: boolean, default: false }
+          x-tier: 3
+      responses:
+        '200':
+          description: Paginated documents.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedDocuments' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [documents]
+      summary: Finalize an uploaded file and create the document.
+      description: |
+        Step 3 of the upload flow. Validates the staged file (size, content
+        type, optional sha256), creates the Document with `ingestion_state =
+        pending`, and enqueues the Inngest ingestion pipeline.
+      operationId: createDocument
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateDocumentRequest' }
+      responses:
+        '201':
+          description: Document created; ingestion enqueued.
+          headers:
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /documents/uploads:
+    post:
+      tags: [documents]
+      summary: Request a signed upload URL.
+      description: |
+        Step 1 of the upload flow. Returns a Supabase Storage signed PUT URL
+        plus an `upload_id` to pass to `POST /documents`. The file body never
+        crosses the API; the browser uploads direct to storage.
+      operationId: createUpload
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUploadRequest' }
+      responses:
+        '201':
+          description: Upload URL minted.
+          headers:
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateUploadResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /documents/{document_id}:
+    parameters:
+      - { $ref: '#/components/parameters/DocumentId' }
+    get:
+      tags: [documents]
+      summary: Retrieve document metadata and ingestion state.
+      operationId: getDocument
+      x-api-stability: stable
+      x-tier: 1
+      responses:
+        '200':
+          description: Document.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    patch:
+      tags: [documents]
+      summary: Edit editable document metadata.
+      description: |
+        Partial-object merge. Omitted fields are unchanged; explicit `null`
+        clears (where the field is nullable). The file body is immutable —
+        re-upload to replace content.
+      operationId: updateDocument
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateDocumentRequest' }
+      responses:
+        '200':
+          description: Updated document.
+          headers:
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    delete:
+      tags: [documents]
+      summary: Delete a document.
+      description: |
+        Tier 1: hard delete — removes chunks + embeddings. Tier 3 changes the
+        semantics to soft delete (transition to `retired`); the operation
+        signature is unchanged so clients keep working.
+      operationId: deleteDocument
+      x-api-stability: stable
+      x-tier: 1
+      responses:
+        '204':
+          description: Deleted.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /documents/__POST__:
+    # Phantom path entry to keep the file readable; ignore — see /documents below
+    # collapsed implementation.
+    {}
+
+  # --- /documents POST + GET combined (real entry) -------------------------
+  # The following is the canonical path for /documents covering both methods.
+  # OpenAPI does not allow two `paths:` entries with the same key, so we keep
+  # GET and POST together here. The bare /documents GET above is a duplicate
+  # documentation block; the parser will reject it. Remove the GET-only entry.
+
+  "/documents:__canonical__":
+    # IGNORED at runtime — placeholder so the YAML parses while we refactor.
+    {}
+
+  /documents/{document_id}:reprocess:
+    parameters:
+      - { $ref: '#/components/parameters/DocumentId' }
+    post:
+      tags: [documents]
+      summary: Re-run the ingestion pipeline on an existing document.
+      description: REQ-1.2.5 (MAY). Useful after a chunking-strategy change.
+      operationId: reprocessDocument
+      x-api-stability: beta
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        '202':
+          description: Reprocess accepted; document transitions back to `pending`.
+          headers:
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /documents/{document_id}/ingestion-events:
+    parameters:
+      - { $ref: '#/components/parameters/DocumentId' }
+    get:
+      tags: [documents]
+      summary: Ingestion progress events; SSE or paginated JSON.
+      description: |
+        Content-negotiates on `Accept`. `text/event-stream` returns a live SSE
+        stream of events until the document reaches `ready` or `failed`;
+        `application/json` returns a cursor-paginated list of past events.
+      operationId: listIngestionEvents
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Paginated events (JSON) or live stream (SSE).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedIngestionEvents' }
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE stream of `IngestionEvent` payloads, terminated when the
+                  document reaches `ready` or `failed`.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /documents/{document_id}/chunks:
+    parameters:
+      - { $ref: '#/components/parameters/DocumentId' }
+    get:
+      tags: [chunks]
+      summary: List chunks of a document (debug / eval).
+      operationId: listChunks
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Paginated chunks.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedChunks' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /chunks/{chunk_id}:
+    parameters:
+      - name: chunk_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [chunks]
+      summary: Resolve a single chunk by id.
+      operationId: getChunk
+      x-api-stability: stable
+      x-tier: 1
+      responses:
+        '200':
+          description: Chunk.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chunk' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  "/citations:resolve":
+    post:
+      tags: [citations]
+      summary: Batch-resolve chunk ids to fully-hydrated citations.
+      description: |
+        Returns "unavailable" stubs for citations whose underlying chunk has
+        been deleted (REQ-1.2.4 graceful degrade).
+      operationId: resolveCitations
+      x-api-stability: stable
+      x-tier: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResolveCitationsRequest' }
+      responses:
+        '200':
+          description: Resolved citations.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResolveCitationsResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  # ============================================================
+  # Tier 1 — chats
+  # ============================================================
+
+  /chats:
+    get:
+      tags: [chats]
+      summary: List chat sessions for the current user, newest first.
+      operationId: listChats
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: archived
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Paginated chats.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedChats' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [chats]
+      summary: Create a chat session.
+      description: |
+        Optionally accepts a `first_message`. When `first_message` is present
+        and `Accept: text/event-stream` is set, the response is an SSE stream
+        of the assistant reply (the new chat id appears in the `stream_start`
+        event). Without `first_message`, returns the Chat resource as JSON.
+      operationId: createChat
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateChatRequest' }
+      responses:
+        '201':
+          description: 'Chat created; SSE if `first_message` + `Accept: text/event-stream`.'
+          headers:
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chat' }
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE stream — see `chat-events.schema.json`.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /chats/{chat_id}:
+    parameters:
+      - { $ref: '#/components/parameters/ChatId' }
+    get:
+      tags: [chats]
+      summary: Retrieve chat metadata.
+      operationId: getChat
+      x-api-stability: stable
+      x-tier: 1
+      responses:
+        '200':
+          description: Chat.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chat' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    patch:
+      tags: [chats]
+      summary: Rename or archive a chat.
+      operationId: updateChat
+      x-api-stability: stable
+      x-tier: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateChatRequest' }
+      responses:
+        '200':
+          description: Updated chat.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chat' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    delete:
+      tags: [chats]
+      summary: Delete a chat (cascades messages).
+      operationId: deleteChat
+      x-api-stability: stable
+      x-tier: 1
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /chats/{chat_id}/messages:
+    parameters:
+      - { $ref: '#/components/parameters/ChatId' }
+    get:
+      tags: [chats]
+      summary: List messages in a chat, oldest first.
+      operationId: listMessages
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Paginated messages.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedMessages' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [chats]
+      summary: Send a user message; receive assistant reply.
+      description: |
+        Content-negotiates on `Accept`. `text/event-stream` returns an SSE
+        stream described by `chat-events.schema.json`; `application/json`
+        returns the finalized `Message` once generation completes.
+
+        `as_of_date` and `retrieval.mode` are accepted in all tiers but Tier 1
+        servers return 422 `code=feature.not_available` if either is non-null.
+        This keeps the generated client type stable across tiers.
+      operationId: sendMessage
+      x-api-stability: stable
+      x-tier: 1
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendMessageRequest' }
+      responses:
+        '200':
+          description: Assistant reply — JSON (non-streaming) or SSE (streaming).
+          headers:
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE stream of chat events. Frame shape:
+                  `event: <type>\nid: <monotonic-int>\ndata: <json>`.
+                  Payload schemas live in `chat-events.schema.json`.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /messages/{message_id}:
+    parameters:
+      - name: message_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [chats]
+      summary: Retrieve a single message and its citations.
+      operationId: getMessage
+      x-api-stability: stable
+      x-tier: 1
+      responses:
+        '200':
+          description: Message.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  # ============================================================
+  # Tier 2 — workspaces
+  # ============================================================
+
+  /workspaces/current:
+    get:
+      tags: [workspaces]
+      summary: Current workspace details.
+      operationId: getCurrentWorkspace
+      x-api-stability: stable
+      x-tier: 2
+      responses:
+        '200':
+          description: Workspace.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workspace' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    patch:
+      tags: [workspaces]
+      summary: Update workspace settings (admin).
+      operationId: updateCurrentWorkspace
+      x-api-stability: stable
+      x-tier: 2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWorkspaceRequest' }
+      responses:
+        '200':
+          description: Updated workspace.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workspace' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /workspaces/current/members:
+    get:
+      tags: [workspaces]
+      summary: List workspace members (offset pagination).
+      operationId: listWorkspaceMembers
+      x-api-stability: stable
+      x-tier: 2
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+      responses:
+        '200':
+          description: Paginated members.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedWorkspaceMembers' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [workspaces]
+      summary: Invite a member (admin).
+      operationId: inviteWorkspaceMember
+      x-api-stability: stable
+      x-tier: 2
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InviteMemberRequest' }
+      responses:
+        '201':
+          description: Member invited (pending acceptance).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceMember' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /workspaces/current/members/{user_id}:
+    parameters:
+      - name: user_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [workspaces]
+      summary: Change a member's role (admin).
+      operationId: updateWorkspaceMember
+      x-api-stability: stable
+      x-tier: 2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateMemberRequest' }
+      responses:
+        '200':
+          description: Updated member.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceMember' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    delete:
+      tags: [workspaces]
+      summary: Remove a member (admin).
+      operationId: removeWorkspaceMember
+      x-api-stability: stable
+      x-tier: 2
+      responses:
+        '204': { description: Removed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  "/workspaces/current/invitations/{token}:accept":
+    parameters:
+      - name: token
+        in: path
+        required: true
+        schema: { type: string, minLength: 16, maxLength: 200 }
+    post:
+      tags: [workspaces]
+      summary: Accept a workspace invitation (token from email).
+      operationId: acceptWorkspaceInvitation
+      x-api-stability: stable
+      x-tier: 2
+      responses:
+        '200':
+          description: Membership created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceMember' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  # ============================================================
+  # Tier 2 — billing
+  # ============================================================
+
+  /billing/plans:
+    get:
+      tags: [billing]
+      summary: Catalog of subscription plans.
+      operationId: listPlans
+      x-api-stability: stable
+      x-tier: 2
+      responses:
+        '200':
+          description: Plans.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlansResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /billing/subscription:
+    get:
+      tags: [billing]
+      summary: Current workspace subscription.
+      operationId: getSubscription
+      x-api-stability: stable
+      x-tier: 2
+      responses:
+        '200':
+          description: Subscription.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /billing/checkout-sessions:
+    post:
+      tags: [billing]
+      summary: Create a Stripe Checkout session (admin).
+      operationId: createCheckoutSession
+      x-api-stability: stable
+      x-tier: 2
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCheckoutRequest' }
+      responses:
+        '201':
+          description: Checkout session created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /billing/portal-sessions:
+    post:
+      tags: [billing]
+      summary: Create a Stripe Customer Portal session (admin).
+      operationId: createPortalSession
+      x-api-stability: stable
+      x-tier: 2
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePortalRequest' }
+      responses:
+        '201':
+          description: Portal session created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PortalSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /billing/usage:
+    get:
+      tags: [billing]
+      summary: Current-period usage report.
+      operationId: getUsage
+      x-api-stability: stable
+      x-tier: 2
+      responses:
+        '200':
+          description: Usage report.
+          headers:
+            Cache-Control:
+              schema: { type: string, default: 'no-store' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UsageReport' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /billing/usage/events:
+    get:
+      tags: [billing]
+      summary: Granular usage events (admin).
+      operationId: listUsageEvents
+      x-api-stability: stable
+      x-tier: 2
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: metric
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Paginated events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedUsageEvents' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /billing/webhook:
+    post:
+      tags: [billing]
+      summary: Stripe-signed webhook receiver.
+      description: |
+        Verified against `STRIPE_WEBHOOK_SECRET` via `stripe.webhooks.constructEvent`.
+        Processed idempotently keyed on the Stripe event id. This is the only
+        endpoint outside `bearerAuth`.
+      operationId: receiveStripeWebhook
+      security:
+        - webhookSignature: []
+      x-api-stability: stable
+      x-tier: 2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StripeEvent' }
+      responses:
+        '200': { description: Event accepted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Signature verification failed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  # ============================================================
+  # Tier 2 — audit
+  # ============================================================
+
+  /audit-logs:
+    get:
+      tags: [audit]
+      summary: Query the audit log (admin).
+      operationId: listAuditLogs
+      x-api-stability: stable
+      x-tier: 2
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: actor_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: resource_type
+          in: query
+          schema: { type: string }
+        - name: resource_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Paginated audit entries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedAuditLogEntries' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  "/audit-logs:export":
+    post:
+      tags: [audit]
+      summary: Kick off an audit-log export job (admin).
+      operationId: exportAuditLogs
+      x-api-stability: stable
+      x-tier: 2
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExportAuditLogsRequest' }
+      responses:
+        '202':
+          description: Export job accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditLogExport' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /audit-log-exports/{export_id}:
+    parameters:
+      - name: export_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [audit]
+      summary: Poll an export job (admin); returns a signed download URL when ready.
+      operationId: getAuditLogExport
+      x-api-stability: stable
+      x-tier: 2
+      responses:
+        '200':
+          description: Export status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditLogExport' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  # ============================================================
+  # Tier 2 — admin
+  # ============================================================
+
+  /admin/overview:
+    get:
+      tags: [admin]
+      summary: Admin dashboard rollup.
+      description: REQ-2.NF.3 — usage, top errors, recent activity, health.
+      operationId: getAdminOverview
+      x-api-stability: beta
+      x-tier: 2
+      responses:
+        '200':
+          description: Overview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminOverview' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /admin/errors:
+    get:
+      tags: [admin]
+      summary: Recent error summary (admin).
+      description: REQ-2.3.3 / REQ-2.NF.3 — Sentry-correlated rollup; not a proxy.
+      operationId: listAdminErrors
+      x-api-stability: beta
+      x-tier: 2
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Paginated error summaries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedErrorSummaries' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  # ============================================================
+  # Tier 3 — lifecycle
+  # ============================================================
+
+  /documents/{document_id}/versions:
+    parameters:
+      - { $ref: '#/components/parameters/DocumentId' }
+    get:
+      tags: [lifecycle]
+      summary: Walk the version graph from a document.
+      operationId: getVersionGraph
+      x-api-stability: beta
+      x-tier: 3
+      parameters:
+        - name: direction
+          in: query
+          schema:
+            type: string
+            enum: [ancestors, descendants, family]
+            default: family
+        - name: depth
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 20, default: 5 }
+      responses:
+        '200':
+          description: Version graph nodes + edges.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionGraph' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [lifecycle]
+      summary: Create a child version (linked to a prior upload).
+      operationId: createDocumentVersion
+      x-api-stability: beta
+      x-tier: 3
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateVersionRequest' }
+      responses:
+        '201':
+          description: Version created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  "/documents/{document_id}:supersede":
+    parameters:
+      - { $ref: '#/components/parameters/DocumentId' }
+    post:
+      tags: [lifecycle]
+      summary: Mark a document as superseded by another.
+      operationId: supersedeDocument
+      x-api-stability: beta
+      x-tier: 3
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SupersedeRequest' }
+      responses:
+        '200':
+          description: Supersession applied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupersessionResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  "/documents:bulk-supersede":
+    post:
+      tags: [lifecycle]
+      summary: Bulk supersession across a document family (admin).
+      operationId: bulkSupersedeDocuments
+      x-api-stability: beta
+      x-tier: 3
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BulkSupersedeRequest' }
+      responses:
+        '200':
+          description: Bulk supersession result (partial success allowed).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BulkSupersedeResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /documents/{document_id}/transitions:
+    parameters:
+      - { $ref: '#/components/parameters/DocumentId' }
+    get:
+      tags: [lifecycle]
+      summary: Transition history for a document.
+      operationId: listTransitions
+      x-api-stability: beta
+      x-tier: 3
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Paginated transitions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedTransitions' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [lifecycle]
+      summary: Apply a lifecycle state transition (admin).
+      description: Server validates legality against the state machine; 422 on illegal.
+      operationId: createTransition
+      x-api-stability: beta
+      x-tier: 3
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTransitionRequest' }
+      responses:
+        '201':
+          description: Transition recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transition' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  # ============================================================
+  # Tier 4 — knowledge graph
+  # ============================================================
+
+  /kg/triples:
+    get:
+      tags: [kg]
+      summary: Query triples.
+      operationId: listTriples
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: subject
+          in: query
+          schema: { type: string }
+        - name: predicate
+          in: query
+          schema: { type: string }
+        - name: object
+          in: query
+          schema: { type: string }
+        - name: source_doc
+          in: query
+          schema: { type: string, format: uuid }
+        - name: as_of_date
+          in: query
+          schema: { type: string, format: date }
+        - name: include_retracted
+          in: query
+          description: Admin-only.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Paginated triples.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedTriples' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [kg]
+      summary: Manually assert a triple (admin).
+      operationId: createTriple
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTripleRequest' }
+      responses:
+        '201':
+          description: Triple asserted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Triple' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /kg/triples/{triple_id}:
+    parameters:
+      - name: triple_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [kg]
+      summary: Retrieve a single triple with full provenance + retraction state.
+      operationId: getTriple
+      x-api-stability: experimental
+      x-tier: 4
+      responses:
+        '200':
+          description: Triple.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Triple' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  "/kg/triples/{triple_id}:retract":
+    parameters:
+      - name: triple_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [kg]
+      summary: Soft-retract a triple (admin). No hard delete (REQ-4.3.2).
+      operationId: retractTriple
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RetractTripleRequest' }
+      responses:
+        '200':
+          description: Triple retracted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Triple' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /kg/entities:
+    get:
+      tags: [kg]
+      summary: Search entities.
+      operationId: listEntities
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: type
+          in: query
+          schema: { type: string, description: 'Ontology class IRI or CURIE.' }
+      responses:
+        '200':
+          description: Paginated entities.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedEntities' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [kg]
+      summary: Create or upsert an entity (admin).
+      operationId: createEntity
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateEntityRequest' }
+      responses:
+        '201':
+          description: Entity created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entity' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /kg/entities/{entity_id}:
+    parameters:
+      - name: entity_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [kg]
+      summary: Retrieve an entity with aliases and relation summary.
+      operationId: getEntity
+      x-api-stability: experimental
+      x-tier: 4
+      responses:
+        '200':
+          description: Entity.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entity' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    patch:
+      tags: [kg]
+      summary: Edit canonical name or aliases (admin).
+      operationId: updateEntity
+      x-api-stability: experimental
+      x-tier: 4
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateEntityRequest' }
+      responses:
+        '200':
+          description: Updated entity.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Entity' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  "/kg/entities:merge":
+    post:
+      tags: [kg]
+      summary: Merge entity A into entity B (admin).
+      description: Rewrites aliases, rebinds triples. Source entity is retired.
+      operationId: mergeEntities
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MergeEntitiesRequest' }
+      responses:
+        '200':
+          description: Merge result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MergeResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /kg/relations:
+    get:
+      tags: [kg]
+      summary: List relation types declared by attached ontologies.
+      operationId: listRelations
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Paginated relation types.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedRelationTypes' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /kg/ontologies:
+    get:
+      tags: [kg]
+      summary: List ontologies attached to the workspace.
+      operationId: listOntologies
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Paginated ontologies.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedOntologies' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [kg]
+      summary: Upload an RDFS/OWL ontology fragment (admin).
+      operationId: uploadOntology
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - name: name
+          in: query
+          required: true
+          schema: { type: string, maxLength: 200 }
+        - name: iri
+          in: query
+          schema: { type: string, format: uri }
+      requestBody:
+        required: true
+        content:
+          text/turtle:
+            schema: { type: string, contentMediaType: text/turtle }
+          application/rdf+xml:
+            schema: { type: string, contentMediaType: application/rdf+xml }
+          application/ld+json:
+            schema: { type: object }
+          application/owl+xml:
+            schema: { type: string, contentMediaType: application/owl+xml }
+      responses:
+        '201':
+          description: Ontology accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ontology' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /kg/ontologies/{ontology_id}:
+    parameters:
+      - name: ontology_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [kg]
+      summary: Retrieve ontology metadata and summary.
+      operationId: getOntology
+      x-api-stability: experimental
+      x-tier: 4
+      responses:
+        '200':
+          description: Ontology.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ontology' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    delete:
+      tags: [kg]
+      summary: Delete an ontology (admin); 409 if extractions depend on it.
+      operationId: deleteOntology
+      x-api-stability: experimental
+      x-tier: 4
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /kg/sparql:
+    get:
+      tags: [kg]
+      summary: Execute a SPARQL query (small queries).
+      description: |
+        W3C SPARQL 1.1 Protocol GET binding. Members can call; rate-limited
+        harder than chat. Use POST for large query strings.
+      operationId: sparqlQueryGet
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema: { type: string }
+        - name: default-graph-uri
+          in: query
+          schema: { type: array, items: { type: string, format: uri } }
+        - name: named-graph-uri
+          in: query
+          schema: { type: array, items: { type: string, format: uri } }
+      responses:
+        '200':
+          description: SPARQL results.
+          content:
+            application/sparql-results+json:
+              schema: { $ref: '#/components/schemas/SparqlResults' }
+            application/sparql-results+xml:
+              schema: { type: string }
+            text/csv:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [kg]
+      summary: Execute a SPARQL query (admin only).
+      description: |
+        Admin-only because free-form SPARQL is a DoS vector. Non-admins should
+        use `POST /kg/sparql/templates/{id}:execute`.
+      operationId: sparqlQueryPost
+      x-api-stability: experimental
+      x-tier: 4
+      requestBody:
+        required: true
+        content:
+          application/sparql-query:
+            schema: { type: string }
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string }
+                'default-graph-uri': { type: array, items: { type: string } }
+                'named-graph-uri': { type: array, items: { type: string } }
+      responses:
+        '200':
+          description: SPARQL results.
+          content:
+            application/sparql-results+json:
+              schema: { $ref: '#/components/schemas/SparqlResults' }
+            application/sparql-results+xml:
+              schema: { type: string }
+            text/csv:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  /kg/sparql/templates:
+    get:
+      tags: [kg]
+      summary: List curated SPARQL query templates.
+      operationId: listSparqlTemplates
+      x-api-stability: experimental
+      x-tier: 4
+      parameters:
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+        - name: category
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated templates.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaginatedSparqlTemplates' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+  "/kg/sparql/templates/{template_id}:execute":
+    parameters:
+      - name: template_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [kg]
+      summary: Execute a curated template with bound parameters.
+      description: The LLM-friendly path. Reliable text-to-SPARQL surface.
+      operationId: executeSparqlTemplate
+      x-api-stability: experimental
+      x-tier: 4
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExecuteTemplateRequest' }
+      responses:
+        '200':
+          description: SPARQL results.
+          content:
+            application/sparql-results+json:
+              schema: { $ref: '#/components/schemas/SparqlResults' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+
+components:
+
+  # ============================================================
+  # Security schemes
+  # ============================================================
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Supabase-issued JWT validated against the project's JWKS:
+        `https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json`.
+
+        Required claims: `sub`, `aud="authenticated"`, `email`, `exp`.
+        From Tier 2+: `app_metadata.workspace_id`, `app_metadata.role`.
+
+        Tenant context for RLS is derived EXCLUSIVELY from
+        `app_metadata.workspace_id`; no header or body parameter may override it.
+    webhookSignature:
+      type: apiKey
+      in: header
+      name: Stripe-Signature
+      description: |
+        Stripe webhook signature, verified via `stripe.webhooks.constructEvent`
+        against `STRIPE_WEBHOOK_SECRET`. Used only by `POST /billing/webhook`.
+
+  # ============================================================
+  # Common parameters
+  # ============================================================
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, maxLength: 512 }
+      description: Opaque forward cursor; clients must not parse it.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema: { type: string, maxLength: 255 }
+      description: |
+        Opaque key. Replay-with-same-body returns the original response and
+        sets `Idempotency-Replayed: true`. Replay-with-different-body returns
+        `409 idempotency.key_reused`.
+    DocumentId:
+      name: document_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ChatId:
+      name: chat_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  # ============================================================
+  # Common response headers
+  # ============================================================
+
+  headers:
+    IdempotencyReplayed:
+      schema: { type: boolean }
+      description: True when the response was served from an idempotency cache.
+    XRequestId:
+      schema: { type: string, format: uuid }
+      description: Correlation id (NF-OBS.1). Echoes a client-supplied `X-Request-Id` if present.
+    XRateLimitLimit:
+      schema: { type: integer }
+    XRateLimitRemaining:
+      schema: { type: integer }
+    XRateLimitReset:
+      schema: { type: integer, description: 'Unix epoch seconds.' }
+    RetryAfter:
+      schema: { type: integer, description: 'Seconds until retry is acceptable.' }
+
+  # ============================================================
+  # Standard error responses
+  # ============================================================
+
+  responses:
+    BadRequest:
+      description: Request was malformed (parse error, bad enum, etc.).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Authenticated user lacks the required role.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Resource not found, or hidden by RLS.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: State conflict (e.g., finalize on already-finalized upload).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Gone:
+      description: Resource permanently removed.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Request body exceeds the documented limit (e.g., 50 MB upload).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnsupportedMediaType:
+      description: Content-Type not accepted for this operation.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnprocessableEntity:
+      description: Semantic validation failure (e.g., illegal lifecycle transition).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TooManyRequests:
+      description: Rate limit or usage limit hit.
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    InternalServerError:
+      description: Unhandled server error.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ServiceUnavailable:
+      description: Upstream dependency degraded (LLM, embedding, storage).
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  # ============================================================
+  # Schemas
+  # ============================================================
+
+  schemas:
+
+    # ----- cross-cutting --------------------------------------
+
+    Problem:
+      type: object
+      description: RFC 9457 problem detail.
+      required: [type, title, status, request_id, code]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the problem class.
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance:
+          type: string
+          format: uri
+          description: URI identifying the specific occurrence.
+        request_id:
+          type: string
+          format: uuid
+          description: Correlation id (NF-OBS.1).
+        code:
+          type: string
+          description: Machine-readable code (e.g., `document.not_found`, `usage.limit_exceeded`).
+        errors:
+          type: array
+          description: Field-level errors (typically on 422).
+          items:
+            type: object
+            required: [pointer, code]
+            properties:
+              pointer: { type: string, description: 'JSON Pointer to the offending field.' }
+              code: { type: string }
+              detail: { type: string }
+        retry_after_seconds:
+          type: integer
+          description: Suggested wait before retry (typically 429/503).
+
+    Page:
+      type: object
+      required: [limit]
+      properties:
+        limit: { type: integer }
+        next_cursor:
+          type: [string, "null"]
+          description: Opaque; null at end of results.
+        prev_cursor:
+          type: [string, "null"]
+        total:
+          type: integer
+          description: Present only for offset-paginated lists.
+        total_pages:
+          type: integer
+          description: Present only for offset-paginated lists.
+
+    Timestamps:
+      type: object
+      required: [created_at, updated_at]
+      properties:
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Actor:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        display_name: { type: string }
+
+    Provenance:
+      type: object
+      description: REQ-5.1.5 uniform provenance contract; added in Tier 1 forward-compat.
+      properties:
+        source_uri: { type: string, format: uri }
+        source_doc_id: { type: string, format: uuid }
+        source_chunk_id: { type: string, format: uuid }
+        version_id: { type: string }
+        snapshot_id: { type: string }
+        effective_date: { type: string, format: date }
+
+    # ----- Tier 0 ---------------------------------------------
+
+    HealthResponse:
+      type: object
+      required: [status, version, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, down]
+        version: { type: string }
+        checks:
+          type: array
+          items: { $ref: '#/components/schemas/HealthCheck' }
+
+    HealthCheck:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+          examples: [postgres, storage, inngest, langfuse, stripe, sparql_store]
+        status:
+          type: string
+          enum: [ok, degraded, down]
+        latency_ms: { type: number }
+        message: { type: string }
+
+    VersionResponse:
+      type: object
+      required: [api_version, spec_version, environment]
+      properties:
+        api_version: { type: string }
+        spec_version: { type: string, description: 'Mirrors `info.version`.' }
+        git_sha: { type: string }
+        built_at: { type: string, format: date-time }
+        environment:
+          type: string
+          enum: [dev, preview, prod]
+
+    # ----- Tier 1 — identity ----------------------------------
+
+    MeResponse:
+      type: object
+      required: [user, workspace, roles]
+      properties:
+        user:
+          type: object
+          required: [id, email]
+          properties:
+            id: { type: string, format: uuid }
+            email: { type: string, format: email }
+            display_name: { type: string }
+            avatar_url: { type: string, format: uri }
+        workspace: { $ref: '#/components/schemas/Workspace' }
+        roles:
+          type: array
+          items: { type: string, enum: [member, admin] }
+
+    Workspace:
+      allOf:
+        - $ref: '#/components/schemas/Timestamps'
+        - type: object
+          required: [id, name, slug]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            slug: { type: string }
+            plan_id:
+              type: [string, "null"]
+              description: Tier 2+; nullable in Tier 1.
+            default_model:
+              type: [string, "null"]
+              description: Tier 2+; nullable in Tier 1.
+
+    UpdateWorkspaceRequest:
+      type: object
+      properties:
+        name: { type: string }
+        default_model: { type: [string, "null"] }
+        retrieval_defaults:
+          type: object
+          properties:
+            top_k: { type: integer, minimum: 1, maximum: 50 }
+            include_retired: { type: boolean }
+
+    # ----- Tier 1 — documents ---------------------------------
+
+    DocumentStatus:
+      type: string
+      description: |
+        Tier 1 enum: `draft`, `current`, `retired`.
+        Tier 3 widens with: `approved`, `superseded`.
+      enum: [draft, approved, current, retired, superseded]
+
+    IngestionState:
+      type: string
+      enum: [pending, extracting, chunking, embedding, ready, failed]
+
+    Document:
+      allOf:
+        - $ref: '#/components/schemas/Timestamps'
+        - type: object
+          required:
+            - id
+            - workspace_id
+            - title
+            - version
+            - status
+            - ingestion_state
+            - size_bytes
+            - content_type
+            - storage_object_key
+            - embedding_model
+            - uploaded_by
+          properties:
+            id: { type: string, format: uuid }
+            workspace_id: { type: string, format: uuid }
+            title: { type: string }
+            version: { type: string }
+            status: { $ref: '#/components/schemas/DocumentStatus' }
+            effective_date: { type: [string, "null"], format: date }
+            ingestion_state: { $ref: '#/components/schemas/IngestionState' }
+            ingestion_error: { type: [string, "null"] }
+            size_bytes: { type: integer }
+            page_count: { type: [integer, "null"] }
+            content_type: { type: string }
+            storage_object_key: { type: string }
+            embedding_model: { type: string }
+            uploaded_by: { $ref: '#/components/schemas/Actor' }
+            # Tier 3 additions (nullable in earlier tiers)
+            parent_version_id:
+              type: [string, "null"]
+              format: uuid
+              description: Tier 3+.
+            superseded_by_id:
+              type: [string, "null"]
+              format: uuid
+              description: Tier 3+.
+            supersedes_ids:
+              type: array
+              items: { type: string, format: uuid }
+              description: Tier 3+ transitive view.
+            retired_at:
+              type: [string, "null"]
+              format: date-time
+              description: Tier 3+.
+            retired_by:
+              anyOf:
+                - $ref: '#/components/schemas/Actor'
+                - type: "null"
+              description: Tier 3+.
+            retirement_reason:
+              type: [string, "null"]
+              description: Tier 3+.
+            provenance:
+              anyOf:
+                - $ref: '#/components/schemas/Provenance'
+                - type: "null"
+
+    CreateUploadRequest:
+      type: object
+      required: [filename, size_bytes, content_type]
+      properties:
+        filename: { type: string, maxLength: 512 }
+        size_bytes: { type: integer, minimum: 1, maximum: 52428800 }
+        content_type:
+          type: string
+          description: Tier 1 accepts `application/pdf`. Tier 5 widens (REQ-5.1.1).
+        sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+
+    CreateUploadResponse:
+      type: object
+      required:
+        - upload_id
+        - signed_url
+        - signed_url_expires_at
+        - storage_object_key
+        - max_size_bytes
+      properties:
+        upload_id: { type: string, format: uuid }
+        signed_url: { type: string, format: uri }
+        signed_url_expires_at: { type: string, format: date-time }
+        storage_object_key: { type: string }
+        max_size_bytes: { type: integer, default: 52428800 }
+
+    CreateDocumentRequest:
+      type: object
+      required: [upload_id, title]
+      properties:
+        upload_id: { type: string, format: uuid }
+        title: { type: string, maxLength: 500 }
+        version: { type: string, default: '1.0' }
+        status:
+          type: string
+          enum: [draft, current]
+          default: current
+        effective_date: { type: [string, "null"], format: date }
+
+    UpdateDocumentRequest:
+      type: object
+      properties:
+        title: { type: string }
+        version: { type: string }
+        status: { $ref: '#/components/schemas/DocumentStatus' }
+        effective_date: { type: [string, "null"], format: date }
+
+    IngestionEvent:
+      type: object
+      required: [id, document_id, event, occurred_at]
+      properties:
+        id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        event:
+          type: string
+          enum: [state_changed, chunk_extracted, embedding_progress, warning, failed]
+        from_state: { $ref: '#/components/schemas/IngestionState' }
+        to_state: { $ref: '#/components/schemas/IngestionState' }
+        progress:
+          type: object
+          properties:
+            processed: { type: integer }
+            total: { type: integer }
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/Problem'
+            - type: "null"
+        occurred_at: { type: string, format: date-time }
+
+    Chunk:
+      allOf:
+        - $ref: '#/components/schemas/Timestamps'
+        - type: object
+          required:
+            - id
+            - document_id
+            - index
+            - text
+            - token_count
+            - embedding_model
+            - char_start
+            - char_end
+          properties:
+            id: { type: string, format: uuid }
+            document_id: { type: string, format: uuid }
+            index: { type: integer, description: 'Ordinal position within the document.' }
+            text: { type: string }
+            token_count: { type: integer }
+            embedding_model: { type: string }
+            page_number: { type: [integer, "null"] }
+            char_start: { type: integer }
+            char_end: { type: integer }
+            section_path:
+              type: array
+              items: { type: string }
+              description: Heading breadcrumb (outer to inner).
+
+    Citation:
+      type: object
+      required: [id, chunk_id, document_id, document_title, document_version, excerpt]
+      properties:
+        id: { type: string, format: uuid, description: 'Synthetic id for this rendering.' }
+        chunk_id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        document_title: { type: string }
+        document_version: { type: string }
+        page_number: { type: [integer, "null"] }
+        excerpt: { type: string }
+        score: { type: number, description: 'Retrieval score; optional.' }
+        unavailable:
+          type: boolean
+          default: false
+          description: True when the underlying chunk has been deleted (REQ-1.2.4 graceful degrade).
+        unavailable_reason:
+          type: [string, "null"]
+
+    ResolveCitationsRequest:
+      type: object
+      required: [chunk_ids]
+      properties:
+        chunk_ids:
+          type: array
+          items: { type: string, format: uuid }
+          minItems: 1
+          maxItems: 200
+
+    ResolveCitationsResponse:
+      type: object
+      required: [citations]
+      properties:
+        citations:
+          type: array
+          items: { $ref: '#/components/schemas/Citation' }
+
+    # ----- Tier 1 — chats -------------------------------------
+
+    Chat:
+      allOf:
+        - $ref: '#/components/schemas/Timestamps'
+        - type: object
+          required: [id, workspace_id, user_id, title, archived]
+          properties:
+            id: { type: string, format: uuid }
+            workspace_id: { type: string, format: uuid }
+            user_id: { type: string, format: uuid }
+            title: { type: string }
+            archived: { type: boolean, default: false }
+            last_message_at: { type: [string, "null"], format: date-time }
+
+    CreateChatRequest:
+      type: object
+      properties:
+        title: { type: string, maxLength: 200 }
+        first_message:
+          anyOf:
+            - $ref: '#/components/schemas/SendMessageRequest'
+            - type: "null"
+
+    UpdateChatRequest:
+      type: object
+      properties:
+        title: { type: string, maxLength: 200 }
+        archived: { type: boolean }
+
+    Message:
+      type: object
+      required: [id, chat_id, role, content, citations, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        chat_id: { type: string, format: uuid }
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content: { type: string }
+        citations:
+          type: array
+          items: { $ref: '#/components/schemas/Citation' }
+        model: { type: string }
+        usage:
+          type: object
+          properties:
+            input_tokens: { type: integer }
+            output_tokens: { type: integer }
+            total_tokens: { type: integer }
+            cost_usd_micros: { type: integer, description: 'Tier 2+.' }
+        finish_reason:
+          type: string
+          enum: [stop, length, content_filter, error]
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/Problem'
+            - type: "null"
+        as_of_date:
+          type: [string, "null"]
+          format: date
+          description: Tier 3+.
+        retrieval_mode:
+          type: [string, "null"]
+          description: Tier 4+.
+          enum: [vector, hybrid, graph_only]
+        created_at: { type: string, format: date-time }
+
+    SendMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 32000 }
+        model: { type: string }
+        temperature: { type: number, minimum: 0, maximum: 2 }
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 8
+          description: REQ-1.4.2.
+        as_of_date:
+          type: [string, "null"]
+          format: date
+          description: |
+            Tier 3+. Tier 1 servers return 422 if non-null
+            (`code=feature.not_available`).
+        retrieval:
+          type: object
+          description: Tier 4+. Tier 1 servers return 422 if any sub-field is non-null.
+          properties:
+            mode:
+              type: string
+              enum: [vector, hybrid, graph_only]
+            max_chunks: { type: integer, minimum: 1, maximum: 50 }
+            max_triples: { type: integer, minimum: 0, maximum: 200 }
+
+    # ----- Tier 2 — workspaces / members ----------------------
+
+    WorkspaceMember:
+      type: object
+      required: [user_id, workspace_id, email, role]
+      properties:
+        user_id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        display_name: { type: string }
+        role:
+          type: string
+          enum: [admin, member]
+        invited_at: { type: [string, "null"], format: date-time }
+        joined_at: { type: [string, "null"], format: date-time }
+        last_active_at: { type: [string, "null"], format: date-time }
+
+    InviteMemberRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string, format: email }
+        role:
+          type: string
+          enum: [admin, member]
+
+    UpdateMemberRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [admin, member]
+
+    # ----- Tier 2 — billing -----------------------------------
+
+    Plan:
+      type: object
+      required: [id, name, price_usd_micros_monthly, limits]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        price_usd_micros_monthly: { type: integer }
+        price_usd_micros_annual: { type: [integer, "null"] }
+        limits:
+          type: object
+          required: [documents, queries_per_month, storage_gb]
+          properties:
+            documents: { type: integer }
+            queries_per_month: { type: integer }
+            storage_gb: { type: number }
+
+    PlansResponse:
+      type: object
+      required: [plans]
+      properties:
+        plans:
+          type: array
+          items: { $ref: '#/components/schemas/Plan' }
+
+    Subscription:
+      type: object
+      required:
+        - id
+        - workspace_id
+        - plan_id
+        - status
+        - current_period_start
+        - current_period_end
+      properties:
+        id: { type: string }
+        workspace_id: { type: string, format: uuid }
+        plan_id: { type: string }
+        status:
+          type: string
+          enum: [trialing, active, past_due, canceled, incomplete]
+        current_period_start: { type: string, format: date-time }
+        current_period_end: { type: string, format: date-time }
+        cancel_at_period_end: { type: boolean }
+        payment_method_last4: { type: [string, "null"] }
+
+    CreateCheckoutRequest:
+      type: object
+      required: [plan_id, success_url, cancel_url]
+      properties:
+        plan_id: { type: string }
+        success_url: { type: string, format: uri }
+        cancel_url: { type: string, format: uri }
+
+    CheckoutSession:
+      type: object
+      required: [id, url, expires_at]
+      properties:
+        id: { type: string }
+        url: { type: string, format: uri }
+        expires_at: { type: string, format: date-time }
+
+    CreatePortalRequest:
+      type: object
+      required: [return_url]
+      properties:
+        return_url: { type: string, format: uri }
+
+    PortalSession:
+      type: object
+      required: [url, expires_at]
+      properties:
+        url: { type: string, format: uri }
+        expires_at: { type: string, format: date-time }
+
+    UsageMetricName:
+      type: string
+      enum: [documents, queries, storage_bytes, llm_input_tokens, llm_output_tokens]
+
+    UsageMetric:
+      type: object
+      required: [name, value, unit, last_updated_at]
+      properties:
+        name: { $ref: '#/components/schemas/UsageMetricName' }
+        value: { type: number }
+        unit: { type: string }
+        last_updated_at: { type: string, format: date-time }
+
+    UsageReport:
+      type: object
+      required: [period, metrics, limits]
+      properties:
+        period:
+          type: object
+          required: [start, end]
+          properties:
+            start: { type: string, format: date-time }
+            end: { type: string, format: date-time }
+        metrics:
+          type: array
+          items: { $ref: '#/components/schemas/UsageMetric' }
+        limits:
+          type: object
+          required: [documents, queries_per_month, storage_gb]
+          properties:
+            documents: { type: integer }
+            queries_per_month: { type: integer }
+            storage_gb: { type: number }
+        nearing_limit:
+          type: array
+          items: { type: string }
+
+    UsageEvent:
+      type: object
+      required: [id, metric, delta, occurred_at]
+      properties:
+        id: { type: string, format: uuid }
+        metric: { $ref: '#/components/schemas/UsageMetricName' }
+        delta: { type: number }
+        actor:
+          anyOf:
+            - $ref: '#/components/schemas/Actor'
+            - type: "null"
+        resource:
+          type: [object, "null"]
+          properties:
+            type: { type: string }
+            id: { type: string }
+        occurred_at: { type: string, format: date-time }
+
+    StripeEvent:
+      type: object
+      description: |
+        Opaque pass-through aligned with Stripe's event envelope. Verified via
+        signature; payload schema is owned by Stripe.
+      required: [id, type, data]
+      additionalProperties: true
+      properties:
+        id: { type: string }
+        type: { type: string }
+        data: { type: object, additionalProperties: true }
+
+    # ----- Tier 2 — audit / admin ------------------------------
+
+    AuditLogEntry:
+      type: object
+      required: [id, workspace_id, actor, action, resource, occurred_at, request_id]
+      properties:
+        id: { type: string, format: uuid }
+        workspace_id: { type: string, format: uuid }
+        actor: { $ref: '#/components/schemas/Actor' }
+        action:
+          type: string
+          description: Enum of `<resource>.<verb>` strings.
+          examples:
+            - document.uploaded
+            - document.deleted
+            - document.metadata_updated
+            - document.retired
+            - chat.message_sent
+            - member.invited
+            - member.role_changed
+            - member.removed
+            - subscription.changed
+            - triple.asserted
+            - triple.retracted
+            - ontology.uploaded
+        resource:
+          type: object
+          required: [type, id]
+          properties:
+            type: { type: string }
+            id: { type: string }
+        before:
+          type: [object, "null"]
+          additionalProperties: true
+        after:
+          type: [object, "null"]
+          additionalProperties: true
+        request_id: { type: string, format: uuid }
+        ip_address: { type: [string, "null"] }
+        user_agent: { type: [string, "null"] }
+        occurred_at: { type: string, format: date-time }
+
+    ExportAuditLogsRequest:
+      type: object
+      required: [format]
+      properties:
+        format:
+          type: string
+          enum: [csv, jsonl]
+        filters:
+          type: object
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+            actor_id: { type: string, format: uuid }
+            action: { type: string }
+            resource_type: { type: string }
+
+    AuditLogExport:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, running, ready, failed, expired]
+        download_url: { type: [string, "null"], format: uri }
+        download_expires_at: { type: [string, "null"], format: date-time }
+        row_count: { type: [integer, "null"] }
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/Problem'
+            - type: "null"
+
+    ErrorSummary:
+      type: object
+      required: [code, count, first_seen, last_seen]
+      properties:
+        code: { type: string }
+        count: { type: integer }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        sample_request_id: { type: string, format: uuid }
+
+    AdminOverview:
+      type: object
+      required: [current_usage, top_errors, recent_activity, health]
+      properties:
+        current_usage: { $ref: '#/components/schemas/UsageReport' }
+        top_errors:
+          type: array
+          items: { $ref: '#/components/schemas/ErrorSummary' }
+        recent_activity:
+          type: array
+          items: { $ref: '#/components/schemas/AuditLogEntry' }
+        health: { $ref: '#/components/schemas/HealthResponse' }
+
+    # ----- Tier 3 — lifecycle ----------------------------------
+
+    VersionGraphNode:
+      type: object
+      required: [document_id, title, version, status]
+      properties:
+        document_id: { type: string, format: uuid }
+        title: { type: string }
+        version: { type: string }
+        status: { $ref: '#/components/schemas/DocumentStatus' }
+        effective_date: { type: [string, "null"], format: date }
+
+    VersionGraphEdge:
+      type: object
+      required: [from, to, relationship]
+      properties:
+        from: { type: string, format: uuid }
+        to: { type: string, format: uuid }
+        relationship:
+          type: string
+          enum: [parent_of, superseded_by]
+
+    VersionGraph:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items: { $ref: '#/components/schemas/VersionGraphNode' }
+        edges:
+          type: array
+          items: { $ref: '#/components/schemas/VersionGraphEdge' }
+
+    CreateVersionRequest:
+      type: object
+      required: [upload_id, version]
+      properties:
+        upload_id: { type: string, format: uuid }
+        version: { type: string }
+        effective_date: { type: [string, "null"], format: date }
+        status:
+          type: string
+          enum: [draft, approved]
+          default: draft
+
+    SupersedeRequest:
+      type: object
+      required: [superseded_by, effective_date]
+      properties:
+        superseded_by: { type: string, format: uuid }
+        effective_date: { type: string, format: date }
+        reason: { type: string }
+
+    SupersessionResult:
+      type: object
+      required: [superseded, successor, transitions]
+      properties:
+        superseded: { $ref: '#/components/schemas/Document' }
+        successor: { $ref: '#/components/schemas/Document' }
+        transitions:
+          type: array
+          items: { $ref: '#/components/schemas/Transition' }
+
+    BulkSupersedeRequest:
+      type: object
+      required: [mappings]
+      properties:
+        mappings:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            required: [from_document_id, to_document_id, effective_date]
+            properties:
+              from_document_id: { type: string, format: uuid }
+              to_document_id: { type: string, format: uuid }
+              effective_date: { type: string, format: date }
+        reason: { type: string }
+
+    BulkSupersedeResult:
+      type: object
+      required: [succeeded, failed]
+      properties:
+        succeeded:
+          type: array
+          items: { $ref: '#/components/schemas/SupersessionResult' }
+        failed:
+          type: array
+          items:
+            type: object
+            required: [mapping, error]
+            properties:
+              mapping:
+                type: object
+                properties:
+                  from_document_id: { type: string, format: uuid }
+                  to_document_id: { type: string, format: uuid }
+              error: { $ref: '#/components/schemas/Problem' }
+
+    CreateTransitionRequest:
+      type: object
+      required: [to]
+      properties:
+        to: { $ref: '#/components/schemas/DocumentStatus' }
+        reason: { type: string }
+        effective_date: { type: [string, "null"], format: date }
+
+    Transition:
+      type: object
+      required: [id, document_id, to, actor, occurred_at]
+      properties:
+        id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        from:
+          anyOf:
+            - $ref: '#/components/schemas/DocumentStatus'
+            - type: "null"
+        to: { $ref: '#/components/schemas/DocumentStatus' }
+        actor: { $ref: '#/components/schemas/Actor' }
+        reason: { type: [string, "null"] }
+        effective_date: { type: [string, "null"], format: date }
+        occurred_at: { type: string, format: date-time }
+
+    # ----- Tier 4 — knowledge graph ----------------------------
+
+    Triple:
+      type: object
+      required: [id, subject_id, predicate, object, provenance, asserted_at, asserted_by]
+      properties:
+        id: { type: string, format: uuid }
+        subject_id: { type: string, format: uuid }
+        predicate: { type: string, description: 'IRI or CURIE.' }
+        object:
+          type: object
+          properties:
+            entity_id: { type: [string, "null"], format: uuid }
+            literal:
+              type: [object, "null"]
+              required: [value]
+              properties:
+                value: { type: string }
+                datatype: { type: string }
+                language: { type: string }
+        provenance:
+          type: object
+          required: [extraction_method, confidence]
+          properties:
+            source_doc_id: { type: string, format: uuid }
+            source_chunk_id: { type: string, format: uuid }
+            ontology_id: { type: string, format: uuid }
+            extraction_method:
+              type: string
+              enum: [llm, manual, imported]
+            confidence: { type: number, minimum: 0, maximum: 1 }
+        asserted_at: { type: string, format: date-time }
+        asserted_by: { $ref: '#/components/schemas/Actor' }
+        effective_date: { type: [string, "null"], format: date }
+        retracted_at: { type: [string, "null"], format: date-time }
+        retracted_by:
+          anyOf:
+            - $ref: '#/components/schemas/Actor'
+            - type: "null"
+        retraction_reason: { type: [string, "null"] }
+        retraction_kind:
+          type: [string, "null"]
+          enum: [manual, cascade_from_document, cascade_from_triple]
+
+    CreateTripleRequest:
+      type: object
+      required: [subject_id, predicate, object]
+      properties:
+        subject_id: { type: string, format: uuid }
+        predicate: { type: string }
+        object:
+          type: object
+          properties:
+            entity_id: { type: string, format: uuid }
+            literal:
+              type: object
+              properties:
+                value: { type: string }
+                datatype: { type: string }
+                language: { type: string }
+        provenance:
+          type: object
+          properties:
+            source_doc_id: { type: string, format: uuid }
+            source_chunk_id: { type: string, format: uuid }
+            ontology_id: { type: string, format: uuid }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        effective_date: { type: string, format: date }
+
+    RetractTripleRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string }
+
+    Entity:
+      allOf:
+        - $ref: '#/components/schemas/Timestamps'
+        - type: object
+          required: [id, canonical_name, type, aliases, relation_summary]
+          properties:
+            id: { type: string, format: uuid }
+            canonical_name: { type: string }
+            type: { type: string, description: 'Ontology class IRI or CURIE.' }
+            aliases:
+              type: array
+              items: { type: string }
+            description: { type: string }
+            external_ids:
+              type: object
+              additionalProperties: { type: string }
+            relation_summary:
+              type: object
+              required: [outgoing_count, incoming_count]
+              properties:
+                outgoing_count: { type: integer }
+                incoming_count: { type: integer }
+
+    CreateEntityRequest:
+      type: object
+      required: [canonical_name, type]
+      properties:
+        canonical_name: { type: string }
+        type: { type: string }
+        aliases:
+          type: array
+          items: { type: string }
+        description: { type: string }
+        external_ids:
+          type: object
+          additionalProperties: { type: string }
+
+    UpdateEntityRequest:
+      type: object
+      properties:
+        canonical_name: { type: string }
+        description: { type: [string, "null"] }
+        add_aliases:
+          type: array
+          items: { type: string }
+        remove_aliases:
+          type: array
+          items: { type: string }
+
+    MergeEntitiesRequest:
+      type: object
+      required: [source_id, target_id]
+      properties:
+        source_id: { type: string, format: uuid }
+        target_id: { type: string, format: uuid }
+        reason: { type: string }
+
+    MergeResult:
+      type: object
+      required: [target, rebound_triple_count, merged_aliases]
+      properties:
+        target: { $ref: '#/components/schemas/Entity' }
+        rebound_triple_count: { type: integer }
+        merged_aliases:
+          type: array
+          items: { type: string }
+
+    RelationType:
+      type: object
+      required: [iri, label]
+      properties:
+        iri: { type: string }
+        label: { type: string }
+        domain: { type: string }
+        range: { type: string }
+        cardinality: { type: string, examples: ['1..1', '0..*', '1..*'] }
+        inverse_of: { type: string }
+
+    Ontology:
+      allOf:
+        - $ref: '#/components/schemas/Timestamps'
+        - type: object
+          required: [id, name, format, class_count, property_count]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            iri: { type: string, format: uri }
+            format:
+              type: string
+              enum: [turtle, rdfxml, jsonld, owlxml]
+            class_count: { type: integer }
+            property_count: { type: integer }
+            imported_from: { type: [string, "null"], format: uri }
+
+    SparqlResults:
+      type: object
+      description: |
+        W3C SPARQL 1.1 Results JSON shape. For ASK queries the response is
+        `{ "head": {}, "boolean": true|false }`. For SELECT queries it's
+        `{ "head": { "vars": [...] }, "results": { "bindings": [...] } }`.
+      additionalProperties: true
+      properties:
+        head:
+          type: object
+          additionalProperties: true
+        results:
+          type: object
+          additionalProperties: true
+        boolean: { type: boolean }
+
+    SparqlTemplate:
+      type: object
+      required: [id, name, query, params]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        params:
+          type: array
+          items:
+            type: object
+            required: [name, type, required]
+            properties:
+              name: { type: string }
+              type:
+                type: string
+                enum: [string, iri, integer, decimal, boolean, date]
+              required: { type: boolean }
+              description: { type: string }
+        query: { type: string }
+
+    ExecuteTemplateRequest:
+      type: object
+      required: [params]
+      properties:
+        params:
+          type: object
+          additionalProperties: true
+        format:
+          type: string
+          enum: [json, xml, csv]
+          default: json
+
+    # ----- Paginated wrappers ---------------------------------
+
+    PaginatedDocuments:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Document' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedIngestionEvents:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/IngestionEvent' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedChunks:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Chunk' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedChats:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Chat' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedMessages:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedWorkspaceMembers:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/WorkspaceMember' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedUsageEvents:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/UsageEvent' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedAuditLogEntries:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AuditLogEntry' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedErrorSummaries:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ErrorSummary' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedTransitions:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Transition' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedTriples:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Triple' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedEntities:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Entity' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedRelationTypes:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/RelationType' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedOntologies:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Ontology' }
+        page: { $ref: '#/components/schemas/Page' }
+
+    PaginatedSparqlTemplates:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SparqlTemplate' }
+        page: { $ref: '#/components/schemas/Page' }
