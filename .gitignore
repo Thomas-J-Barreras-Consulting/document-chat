@@ -27,6 +27,10 @@ playwright/.cache/
 .env.test.local
 .env.production.local
 
+# Supabase (local CLI state)
+supabase/.branches/
+supabase/.temp/
+
 # Logs
 *.log
 npm-debug.log*

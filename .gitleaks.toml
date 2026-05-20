@@ -1,0 +1,15 @@
+# gitleaks configuration for document-chat.
+# Extends the built-in ruleset; add project-specific allowlist entries here
+# if CI reports a false positive (e.g., an example token in docs).
+
+title = "document-chat"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Project false-positive allowlist"
+paths = [
+  # Auto-generated from openapi.yaml; contains only schema-derived values.
+  '''packages/contracts/src/types\.ts''',
+]

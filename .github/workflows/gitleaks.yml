@@ -1,0 +1,26 @@
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the scan covers every commit in a PR, not just the tip.
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Honors .gitleaks.toml at the repo root if present.
+          GITLEAKS_CONFIG: .gitleaks.toml
+          # NOTE: gitleaks-action is free for personal accounts and public repos.
+          # If this repo is moved under a GitHub *Organization*, set the
+          # GITLEAKS_LICENSE secret (free key from gitleaks.io) or the action
+          # will fail. See https://github.com/gitleaks/gitleaks-action#-license.
