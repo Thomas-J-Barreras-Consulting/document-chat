@@ -1,14 +1,18 @@
 name: e2e-preview
 
 # Runs the Playwright smoke test against a Vercel preview deployment once it's
-# ready. Dormant until the Vercel GitHub integration is connected (no
-# deployment_status events fire before then) — that's expected.
+# ready. Opt-in: stays dormant (the job skips) until the repository variable
+# ENABLE_PREVIEW_E2E is set to "true". Enabling it also requires preview URLs
+# to be reachable by anonymous CI — either disable Vercel Deployment
+# Protection for previews, or add a Protection Bypass for Automation secret and
+# send it via the `x-vercel-protection-bypass` header (see docs/testing.md).
 on:
   deployment_status:
 
 jobs:
   smoke:
     if: >
+      vars.ENABLE_PREVIEW_E2E == 'true' &&
       github.event.deployment_status.state == 'success' &&
       contains(github.event.deployment_status.environment, 'Preview')
     runs-on: ubuntu-latest

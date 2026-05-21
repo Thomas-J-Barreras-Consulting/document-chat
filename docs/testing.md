@@ -86,10 +86,25 @@ E2E_BASE_URL=https://your-preview.vercel.app pnpm --filter web run test:e2e
 
 In CI this is wired through [`.github/workflows/e2e-preview.yml`](../.github/workflows/e2e-preview.yml),
 which triggers on `deployment_status` and runs the smoke test against the
-Vercel preview URL once the deployment succeeds. It stays **dormant until the
-Vercel GitHub integration is connected** (no `deployment_status` events fire
-before then). DB-backed deployment E2E will need a hosted Supabase test
-project wired to the preview env vars — deferred until Tier 1 features exist.
+Vercel preview URL once the deployment succeeds.
+
+It is **opt-in and dormant by default**: the job skips unless the repository
+variable `ENABLE_PREVIEW_E2E` is set to `true` (Settings → Secrets and
+variables → Actions → Variables). This keeps the check green/neutral until
+deployment E2E is genuinely ready (Tier 1).
+
+To enable it later, two things are needed:
+
+1. Set `ENABLE_PREVIEW_E2E=true`.
+2. Make preview URLs reachable by anonymous CI. Vercel **Deployment
+   Protection** puts an auth wall in front of preview URLs by default, so
+   Playwright would hit a login page. Either turn protection off for previews,
+   or keep it on and add a **Protection Bypass for Automation** secret in
+   Vercel, expose it as a GitHub secret, and send it on requests via the
+   `x-vercel-protection-bypass` header.
+
+DB-backed deployment E2E additionally needs a hosted Supabase test project
+wired to the preview env vars — deferred until Tier 1 features exist.
 
 ## CI
 
