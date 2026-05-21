@@ -83,12 +83,16 @@ jobs:
         run: supabase start
 
       - name: Export Supabase env
+        # `supabase status -o env` emits shell-style KEY="value" with quotes.
+        # $GITHUB_ENV takes everything after = verbatim, so the quotes would
+        # become part of the value (breaking URL parsing). Strip them — the
+        # values (URLs, JWTs, hex keys) contain no embedded quotes.
         run: |
           supabase status -o env \
             --override-name api.url=NEXT_PUBLIC_SUPABASE_URL \
             --override-name auth.anon_key=NEXT_PUBLIC_SUPABASE_ANON_KEY \
             --override-name auth.service_role_key=SUPABASE_SERVICE_ROLE_KEY \
-            >> "$GITHUB_ENV"
+            | sed 's/"//g' >> "$GITHUB_ENV"
 
       - name: Integration tests (vitest)
         run: pnpm --filter web run test:integration
