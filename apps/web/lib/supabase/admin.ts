@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import 'server-only';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 
 /**
  * Service-role Supabase client for privileged server-side operations.
@@ -20,6 +21,12 @@ export function createAdminClient(): SupabaseClient {
       autoRefreshToken: false,
       persistSession: false,
       detectSessionInUrl: false,
+    },
+    realtime: {
+      // supabase-js eagerly constructs a Realtime client, which needs a
+      // WebSocket. Node < 22 has no global WebSocket, so supply `ws`. We never
+      // open a realtime connection here — this only satisfies the constructor.
+      transport: WebSocket as unknown as typeof globalThis.WebSocket,
     },
   });
 }
