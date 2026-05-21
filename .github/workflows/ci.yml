@@ -54,3 +54,49 @@ jobs:
 
       - name: E2E (playwright)
         run: pnpm --filter web run test:e2e
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.18.1
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start Supabase
+        run: supabase start
+
+      - name: Export Supabase env
+        # `supabase status -o env` emits shell-style KEY="value" with quotes.
+        # $GITHUB_ENV takes everything after = verbatim, so the quotes would
+        # become part of the value (breaking URL parsing). Strip them — the
+        # values (URLs, JWTs, hex keys) contain no embedded quotes.
+        run: |
+          supabase status -o env \
+            --override-name api.url=NEXT_PUBLIC_SUPABASE_URL \
+            --override-name auth.anon_key=NEXT_PUBLIC_SUPABASE_ANON_KEY \
+            --override-name auth.service_role_key=SUPABASE_SERVICE_ROLE_KEY \
+            | sed 's/"//g' >> "$GITHUB_ENV"
+
+      - name: Integration tests (vitest)
+        run: pnpm --filter web run test:integration
+
+      - name: Stop Supabase
+        if: always()
+        run: supabase stop

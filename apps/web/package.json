@@ -9,22 +9,28 @@
     "lint": "next lint --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:integration": "vitest run -c vitest.integration.config.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {
     "@document-chat/contracts": "workspace:*",
+    "@supabase/ssr": "catalog:",
+    "@supabase/supabase-js": "catalog:",
     "next": "catalog:",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "ws": "catalog:"
   },
   "devDependencies": {
     "@playwright/test": "catalog:",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
+    "@types/ws": "catalog:",
     "@typescript-eslint/eslint-plugin": "catalog:",
     "@typescript-eslint/parser": "catalog:",
     "@vitest/coverage-v8": "catalog:",
+    "dotenv": "catalog:",
     "eslint": "catalog:",
     "eslint-config-next": "catalog:",
     "typescript": "catalog:",
