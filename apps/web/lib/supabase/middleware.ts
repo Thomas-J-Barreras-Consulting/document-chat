@@ -3,6 +3,13 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
 const AUTH_PAGES = new Set(['/login', '/signup']);
+// Page routes that require a session. API routes aren't listed — they return
+// 401 from their handlers rather than redirecting.
+const PROTECTED_PREFIXES = ['/documents'];
+
+function isProtected(pathname: string): boolean {
+  return PROTECTED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
 
 /**
  * Refresh the Supabase session on each request and keep the auth cookies in
@@ -44,9 +51,15 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (user && AUTH_PAGES.has(request.nextUrl.pathname)) {
+  const pathname = request.nextUrl.pathname;
+  if (user && AUTH_PAGES.has(pathname)) {
     const redirectUrl = request.nextUrl.clone();
     redirectUrl.pathname = '/';
+    return NextResponse.redirect(redirectUrl);
+  }
+  if (!user && isProtected(pathname)) {
+    const redirectUrl = request.nextUrl.clone();
+    redirectUrl.pathname = '/login';
     return NextResponse.redirect(redirectUrl);
   }
 
