@@ -41,6 +41,9 @@ export default async function Home() {
           <form action="/auth/signout" method="post" style={{ display: 'inline' }}>
             <button type="submit">Sign out</button>
           </form>
+          <p>
+            <Link href="/documents">Documents</Link>
+          </p>
         </div>
       ) : (
         <p>
