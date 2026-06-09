@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from 'next/server';
 import type { components } from '@document-chat/contracts';
+import { DEFAULT_CHAT_MODEL } from '@document-chat/retrieval';
 import { getOptionalUser } from '../../../../../lib/auth';
+import { getCurrentWorkspace } from '../../../../../lib/workspace';
 import {
   getChatRow,
   getCitationsForMessages,
@@ -15,6 +17,10 @@ import {
 import { problemResponse, unauthorized } from '../../../../../lib/problem';
 import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from '../../../../../lib/documents';
 import { checkTier1FeatureGuards } from '../../route';
+import { runChatTurn } from '../../../../../lib/chat/orchestrate';
+import { buildOrchestratorDeps } from '../../../../../lib/chat/runtime';
+import { sseResponse } from '../../../../../lib/chat/sse';
+import { createSSRClient } from '../../../../../lib/supabase/server';
 
 type SendMessageRequest = components['schemas']['SendMessageRequest'];
 type PaginatedMessages = components['schemas']['PaginatedMessages'];
@@ -22,6 +28,7 @@ type PaginatedMessages = components['schemas']['PaginatedMessages'];
 type Params = { params: Promise<{ chat_id: string }> };
 
 const MAX_CONTENT = 32000;
+const DEFAULT_TOP_K = 8;
 
 function notFoundChat(): NextResponse {
   return problemResponse({ status: 404, code: 'chat.not_found', title: 'Not Found' });
@@ -81,22 +88,12 @@ export async function GET(request: Request, { params }: Params): Promise<NextRes
   return NextResponse.json(body);
 }
 
-// POST /chats/{id}/messages — persist a user message. Streaming and assistant
-// turns land in chunk #15; until then the JSON path returns the persisted
-// user message and SSE is 503.
-export async function POST(request: Request, { params }: Params): Promise<NextResponse> {
+// POST /chats/{id}/messages — content-negotiated. JSON path persists the user
+// message and returns it (no assistant turn); SSE path runs the full
+// retrieve → stream → persist orchestration.
+export async function POST(request: Request, { params }: Params): Promise<Response> {
   const user = await getOptionalUser();
   if (!user) return unauthorized('Sign in to send messages.');
-
-  const accept = request.headers.get('accept') ?? '';
-  if (accept.includes('text/event-stream')) {
-    return problemResponse({
-      status: 503,
-      code: 'streaming.not_available',
-      title: 'Streaming not available',
-      detail: 'SSE streaming for chat replies lands in a later release.',
-    });
-  }
 
   const { chat_id } = await params;
   const chat = await getChatRow(chat_id);
@@ -114,9 +111,7 @@ export async function POST(request: Request, { params }: Params): Promise<NextRe
     });
   }
 
-  if (typeof body?.content !== 'string') {
-    return badRequest('content must be a string.');
-  }
+  if (typeof body?.content !== 'string') return badRequest('content must be a string.');
   const trimmed = body.content.trim();
   if (trimmed.length === 0) return badRequest('content must be a non-empty string.');
   if (body.content.length > MAX_CONTENT) {
@@ -130,12 +125,13 @@ export async function POST(request: Request, { params }: Params): Promise<NextRe
   const feature = checkTier1FeatureGuards(body);
   if (feature) return unprocessable(feature);
 
-  const message = await insertMessage({
+  // Always persist the user message first so a retry / reconnect can find it.
+  const userMessage = await insertMessage({
     chatId: chat_id,
     role: 'user',
     content: body.content,
   });
-  if (!message) {
+  if (!userMessage) {
     return problemResponse({
       status: 500,
       code: 'message.create_failed',
@@ -143,5 +139,40 @@ export async function POST(request: Request, { params }: Params): Promise<NextRe
     });
   }
 
-  return NextResponse.json(toContractMessage(message, []), { status: 200 });
+  const accept = request.headers.get('accept') ?? '';
+  if (!accept.includes('text/event-stream')) {
+    // Non-streaming path: hand back the persisted user message. Clients
+    // wanting the assistant turn negotiate via Accept.
+    return NextResponse.json(toContractMessage(userMessage, []), { status: 200 });
+  }
+
+  // Streaming path — resolve workspace + Anthropic deps, then run the
+  // orchestrator. Errors thrown inside the generator surface as an SSE
+  // `error` frame, not a 5xx — the connection is already upgraded.
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return problemResponse({
+      status: 503,
+      code: 'streaming.not_available',
+      title: 'Streaming not available',
+      detail: 'ANTHROPIC_API_KEY is not configured on this server.',
+    });
+  }
+  const workspace = await getCurrentWorkspace();
+  if (!workspace) {
+    return problemResponse({
+      status: 500,
+      code: 'workspace.not_provisioned',
+      title: 'Workspace not provisioned',
+    });
+  }
+
+  const rlsClient = await createSSRClient();
+  const deps = buildOrchestratorDeps(rlsClient, workspace.id);
+  const events = runChatTurn(deps, {
+    chatId: chat_id,
+    userMessage: body.content,
+    topK: typeof body.top_k === 'number' ? body.top_k : DEFAULT_TOP_K,
+    model: typeof body.model === 'string' ? body.model : DEFAULT_CHAT_MODEL,
+  });
+  return sseResponse(events);
 }

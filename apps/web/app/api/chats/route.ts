@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { NextResponse } from 'next/server';
 import type { components } from '@document-chat/contracts';
+import { DEFAULT_CHAT_MODEL } from '@document-chat/retrieval';
 import { getOptionalUser } from '../../../lib/auth';
 import { getCurrentWorkspace } from '../../../lib/workspace';
 import {
@@ -15,6 +16,12 @@ import {
 } from '../../../lib/chats';
 import { problemResponse, unauthorized } from '../../../lib/problem';
 import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from '../../../lib/documents';
+import { runChatTurn } from '../../../lib/chat/orchestrate';
+import { buildOrchestratorDeps } from '../../../lib/chat/runtime';
+import { sseResponse } from '../../../lib/chat/sse';
+import { createSSRClient } from '../../../lib/supabase/server';
+
+const DEFAULT_TOP_K = 8;
 
 type CreateChatRequest = components['schemas']['CreateChatRequest'];
 type SendMessageRequest = components['schemas']['SendMessageRequest'];
@@ -99,10 +106,10 @@ export async function GET(request: Request): Promise<NextResponse> {
   return NextResponse.json(body);
 }
 
-// POST /chats — create a chat. Optional `first_message` is persisted as a
-// user-role message; streaming (`Accept: text/event-stream`) lands in chunk
-// #15 and is rejected with 503 until then.
-export async function POST(request: Request): Promise<NextResponse> {
+// POST /chats — create a chat. Content-negotiates: JSON path returns the
+// new Chat; SSE path (only when `first_message` is present) returns the
+// streaming assistant reply with the new chat id in the `stream_start` event.
+export async function POST(request: Request): Promise<Response> {
   const user = await getOptionalUser();
   if (!user) return unauthorized('Sign in to create a chat.');
 
@@ -112,16 +119,6 @@ export async function POST(request: Request): Promise<NextResponse> {
       status: 500,
       code: 'workspace.not_provisioned',
       title: 'Workspace not provisioned',
-    });
-  }
-
-  const accept = request.headers.get('accept') ?? '';
-  if (accept.includes('text/event-stream')) {
-    return problemResponse({
-      status: 503,
-      code: 'streaming.not_available',
-      title: 'Streaming not available',
-      detail: 'SSE streaming for chat creation lands in a later release.',
     });
   }
 
@@ -152,6 +149,20 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
   }
 
+  const accept = request.headers.get('accept') ?? '';
+  const wantsStream = accept.includes('text/event-stream');
+  if (wantsStream && !body.first_message) {
+    return badRequest('SSE requires first_message; send a JSON body for an empty chat.');
+  }
+  if (wantsStream && !process.env.ANTHROPIC_API_KEY) {
+    return problemResponse({
+      status: 503,
+      code: 'streaming.not_available',
+      title: 'Streaming not available',
+      detail: 'ANTHROPIC_API_KEY is not configured on this server.',
+    });
+  }
+
   const title =
     typeof body.title === 'string' && body.title.trim().length > 0
       ? body.title.trim()
@@ -170,7 +181,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
   }
 
-  // Persist the user message (no assistant turn yet — chunk #15 wires that).
+  // Persist any first_message regardless of negotiation — both paths need it.
   if (body.first_message) {
     await insertMessage({
       chatId: chat.id,
@@ -179,5 +190,23 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
   }
 
-  return NextResponse.json(toContractChat(chat), { status: 201 });
+  if (!wantsStream) {
+    return NextResponse.json(toContractChat(chat), { status: 201 });
+  }
+
+  // SSE path — the orchestrator drives retrieve → stream → persist; the
+  // stream_start event carries chat.id so the client can wire its UI.
+  const rlsClient = await createSSRClient();
+  const deps = buildOrchestratorDeps(rlsClient, workspace.id);
+  const userContent = body.first_message!.content;
+  const events = runChatTurn(deps, {
+    chatId: chat.id,
+    userMessage: userContent,
+    topK: typeof body.first_message!.top_k === 'number' ? body.first_message!.top_k : DEFAULT_TOP_K,
+    model:
+      typeof body.first_message!.model === 'string'
+        ? body.first_message!.model
+        : DEFAULT_CHAT_MODEL,
+  });
+  return sseResponse(events);
 }

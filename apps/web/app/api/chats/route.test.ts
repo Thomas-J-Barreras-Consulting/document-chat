@@ -96,10 +96,23 @@ describe('POST /chats', () => {
     expect(res.status).toBe(401);
   });
 
-  it('503 when streaming is requested', async () => {
+  it('400 when streaming is requested without a first_message', async () => {
     const res = await POST(postReq({}, { accept: 'text/event-stream' }));
-    expect(res.status).toBe(503);
-    expect((await res.json()).code).toBe('streaming.not_available');
+    expect(res.status).toBe(400);
+  });
+
+  it('503 when streaming is requested without ANTHROPIC_API_KEY', async () => {
+    const prev = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const res = await POST(
+        postReq({ first_message: { content: 'hi' } }, { accept: 'text/event-stream' }),
+      );
+      expect(res.status).toBe(503);
+      expect((await res.json()).code).toBe('streaming.not_available');
+    } finally {
+      if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
+    }
   });
 
   it('201 with a Chat body when no body is provided', async () => {
