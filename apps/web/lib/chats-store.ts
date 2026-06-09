@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// Database I/O for chats, messages, citations. All reads + writes go through
-// the cookie-bound (RLS-scoped) client; the streaming chunk (#15) will add
-// service-role writes for the assistant turn (long-running, no session).
+// Database I/O for chats, messages, citations. User-facing reads + writes
+// run through the cookie-bound (RLS-scoped) client. Long-running streaming
+// writes — the assistant turn — use the service-role client because the
+// stream can outlive the user session refresh; ownership is verified up
+// front by the RLS-scoped chat lookup before any admin write fires.
+import { createAdminClient } from './supabase/admin';
 import { createSSRClient } from './supabase/server';
 import { encodeCursor, decodeCursor } from './documents';
 import type {
@@ -226,4 +229,75 @@ export async function getCitationsForMessages(
     out.set(row.message_id, arr);
   }
   return out;
+}
+
+export interface PersistedAssistantMessage {
+  messageId: string;
+  chatId: string;
+  content: string;
+  model: string;
+  finishReason: 'stop' | 'length' | 'content_filter' | 'error';
+  inputTokens: number;
+  outputTokens: number;
+  citations: Array<{ chunkId: string; documentId: string; score: number; index: number }>;
+}
+
+/**
+ * Insert an assistant message and its citation rows in a single round trip
+ * each, using the service-role client. Returns the inserted message row +
+ * the inserted citation rows so the streaming orchestrator can hydrate the
+ * terminal `message_completed` event without a follow-up read.
+ *
+ * Ownership is the caller's responsibility — verify the chat is RLS-visible
+ * to the user before invoking this, since the admin client bypasses RLS.
+ */
+export async function persistAssistantMessage(
+  input: PersistedAssistantMessage,
+): Promise<{ message: MessageRow; citations: MessageCitationRow[] } | null> {
+  const admin = createAdminClient();
+
+  const { data: msgData, error: msgErr } = await admin
+    .from('messages')
+    .insert({
+      id: input.messageId,
+      chat_id: input.chatId,
+      role: 'assistant',
+      content: input.content,
+      model: input.model,
+      finish_reason: input.finishReason,
+      input_tokens: input.inputTokens,
+      output_tokens: input.outputTokens,
+      total_tokens: input.inputTokens + input.outputTokens,
+    })
+    .select(MESSAGE_COLUMNS)
+    .single();
+  if (msgErr || !msgData) return null;
+
+  if (input.citations.length === 0) {
+    return { message: msgData as unknown as MessageRow, citations: [] };
+  }
+
+  const { data: citData, error: citErr } = await admin
+    .from('citations')
+    .insert(
+      input.citations.map((c) => ({
+        message_id: input.messageId,
+        chunk_id: c.chunkId,
+        document_id: c.documentId,
+        index: c.index,
+        score: c.score,
+      })),
+    )
+    .select(CITATION_COLUMNS);
+  if (citErr || !citData) {
+    // The message persisted but citations didn't — return the message + empty
+    // citations rather than rolling back. The chunk #17 reprocess path can
+    // recover, and the chat is still navigable.
+    return { message: msgData as unknown as MessageRow, citations: [] };
+  }
+
+  return {
+    message: msgData as unknown as MessageRow,
+    citations: citData as unknown as MessageCitationRow[],
+  };
 }

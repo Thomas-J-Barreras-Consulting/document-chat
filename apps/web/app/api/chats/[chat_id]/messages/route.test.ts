@@ -11,6 +11,7 @@ vi.mock('../../../../../lib/chats-store', () => ({
   insertMessage: vi.fn(),
   getCitationsForMessages: vi.fn(),
 }));
+vi.mock('../../../../../lib/workspace', () => ({ getCurrentWorkspace: vi.fn() }));
 
 import { getOptionalUser } from '../../../../../lib/auth';
 import {
@@ -108,9 +109,15 @@ describe('POST /chats/{id}/messages', () => {
     expect(res.status).toBe(401);
   });
 
-  it('503 when streaming is requested', async () => {
-    const res = await POST(postReq({ content: 'hi' }, { accept: 'text/event-stream' }), ctx);
-    expect(res.status).toBe(503);
+  it('503 when streaming is requested but ANTHROPIC_API_KEY is unset', async () => {
+    const prev = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      const res = await POST(postReq({ content: 'hi' }, { accept: 'text/event-stream' }), ctx);
+      expect(res.status).toBe(503);
+    } finally {
+      if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
+    }
   });
 
   it('404 when the chat is absent', async () => {
