@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { getOptionalUser } from '../../../lib/auth';
 import { getDocumentRow } from '../../../lib/documents-store';
+import { AppShell } from '../../app-shell';
 import { DocumentEditor } from './editor';
 import { IngestionPanel } from './ingestion-panel';
 
@@ -21,23 +22,37 @@ export default async function DocumentDetailPage({
   if (!doc) notFound();
 
   return (
-    <main>
-      <h1>{doc.title}</h1>
+    <AppShell user={user}>
+      <div className="page-header">
+        <div className="page-header__title">
+          <h1>{doc.title}</h1>
+          <p>
+            <span className={`badge badge--${doc.status}`}>{doc.status}</span>{' '}
+            <span className={`badge badge--${doc.ingestion_state}`}>{doc.ingestion_state}</span>
+          </p>
+        </div>
+        <Link href="/documents" className="btn btn--ghost btn--sm">
+          ← Back to documents
+        </Link>
+      </div>
 
-      <dl>
-        <dt>Status</dt>
-        <dd>{doc.status}</dd>
-        <dt>Version</dt>
-        <dd>{doc.version}</dd>
-        <dt>Effective date</dt>
-        <dd>{doc.effective_date ?? '—'}</dd>
-        <dt>Size</dt>
-        <dd>{doc.size_bytes.toLocaleString()} bytes</dd>
-        <dt>Type</dt>
-        <dd>{doc.content_type}</dd>
-        <dt>Uploaded</dt>
-        <dd>{new Date(doc.created_at).toLocaleString()}</dd>
-      </dl>
+      <section className="card">
+        <h2 className="card__title">Details</h2>
+        <dl className="kv">
+          <dt>Version</dt>
+          <dd>{doc.version}</dd>
+          <dt>Effective date</dt>
+          <dd>{doc.effective_date ?? '—'}</dd>
+          <dt>Size</dt>
+          <dd>{doc.size_bytes.toLocaleString()} bytes</dd>
+          <dt>Type</dt>
+          <dd>
+            <code>{doc.content_type}</code>
+          </dd>
+          <dt>Uploaded</dt>
+          <dd>{new Date(doc.created_at).toLocaleString()}</dd>
+        </dl>
+      </section>
 
       <IngestionPanel
         documentId={doc.id}
@@ -54,10 +69,6 @@ export default async function DocumentDetailPage({
           effective_date: doc.effective_date,
         }}
       />
-
-      <p>
-        <Link href="/documents">Back to documents</Link>
-      </p>
-    </main>
+    </AppShell>
   );
 }

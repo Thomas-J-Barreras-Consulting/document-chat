@@ -44,22 +44,31 @@ export function NewChatComposer() {
   }
 
   return (
-    <form onSubmit={onSubmit}>
-      <h2>Ask a question</h2>
-      <label>
-        Your question
-        <textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          placeholder="What does the report say about Q3?"
-          rows={3}
-          required
-        />
-      </label>
-      <button type="submit" disabled={busy || content.trim().length === 0}>
-        {busy ? 'Starting…' : 'Start chat'}
-      </button>
-      {error ? <p role="alert">{error}</p> : null}
-    </form>
+    <section className="card">
+      <h2 className="card__title">Ask a question</h2>
+      <form onSubmit={onSubmit}>
+        <label className="field">
+          <span className="field__label">Your question</span>
+          <textarea
+            className="textarea"
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder="What does the report say about Q3?"
+            rows={3}
+            required
+          />
+        </label>
+        <div className="form-actions">
+          <button type="submit" className="btn" disabled={busy || content.trim().length === 0}>
+            {busy ? 'Starting…' : 'Start chat'}
+          </button>
+        </div>
+      </form>
+      {error ? (
+        <p role="alert" className="alert">
+          {error}
+        </p>
+      ) : null}
+    </section>
   );
 }

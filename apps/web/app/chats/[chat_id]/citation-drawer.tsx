@@ -45,58 +45,50 @@ export function CitationDrawer({ chunkId, onClose }: CitationDrawerProps) {
   }, [chunkId]);
 
   return (
-    <aside
-      data-testid="citation-drawer"
-      style={{
-        position: 'fixed',
-        top: 0,
-        right: 0,
-        width: '24rem',
-        maxWidth: '100%',
-        height: '100vh',
-        background: '#fff',
-        borderLeft: '1px solid #ccc',
-        padding: '1.5rem',
-        boxShadow: '-4px 0 16px rgba(0,0,0,0.08)',
-        overflowY: 'auto',
-      }}
-    >
-      <button type="button" onClick={onClose} aria-label="Close citation">
-        Close
-      </button>
-      {error ? (
-        <p role="alert">{error}</p>
-      ) : citation ? (
-        citation.unavailable ? (
-          <p>
-            <em>{citation.unavailable_reason ?? 'Source is no longer available.'}</em>
+    <>
+      <div className="drawer-overlay" onClick={onClose} aria-hidden="true" />
+      <aside
+        data-testid="citation-drawer"
+        className="drawer"
+        role="dialog"
+        aria-label="Source citation"
+      >
+        <div className="drawer__header">
+          <h2 style={{ fontSize: '0.9375rem' }}>Source</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close citation"
+            className="btn btn--ghost btn--sm"
+          >
+            Close
+          </button>
+        </div>
+        {error ? (
+          <p role="alert" className="alert">
+            {error}
           </p>
-        ) : (
-          <>
-            <h3>{citation.document_title}</h3>
-            <p>
-              <small>
+        ) : citation ? (
+          citation.unavailable ? (
+            <p className="muted">
+              <em>{citation.unavailable_reason ?? 'Source is no longer available.'}</em>
+            </p>
+          ) : (
+            <>
+              <h3>{citation.document_title}</h3>
+              <p className="drawer__meta">
                 v{citation.document_version}
                 {citation.page_number !== null && citation.page_number !== undefined
                   ? ` · page ${citation.page_number}`
                   : ''}
-              </small>
-            </p>
-            <blockquote
-              style={{
-                borderLeft: '4px solid #99c',
-                paddingLeft: '0.75rem',
-                margin: '0.5rem 0',
-                whiteSpace: 'pre-wrap',
-              }}
-            >
-              {citation.excerpt}
-            </blockquote>
-          </>
-        )
-      ) : (
-        <p>Loading citation…</p>
-      )}
-    </aside>
+              </p>
+              <blockquote>{citation.excerpt}</blockquote>
+            </>
+          )
+        ) : (
+          <p className="muted">Loading citation…</p>
+        )}
+      </aside>
+    </>
   );
 }
