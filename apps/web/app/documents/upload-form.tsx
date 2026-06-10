@@ -5,6 +5,15 @@ import { useRouter } from 'next/navigation';
 
 type Phase = 'idle' | 'requesting' | 'uploading' | 'finalizing' | 'done' | 'error';
 
+const PHASE_COPY: Record<Phase, string> = {
+  idle: 'Upload',
+  requesting: 'Requesting…',
+  uploading: 'Uploading…',
+  finalizing: 'Finalizing…',
+  done: 'Upload',
+  error: 'Upload',
+};
+
 async function readDetail(res: Response, fallback: string): Promise<string> {
   try {
     const body = await res.json();
@@ -76,26 +85,45 @@ export function UploadForm() {
   }
 
   return (
-    <form onSubmit={onSubmit}>
-      <h2>Upload a PDF</h2>
-      <label>
-        File
-        <input type="file" accept="application/pdf,.pdf" onChange={onFileChange} required />
-      </label>
-      <label>
-        Title
-        <input
-          type="text"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="Document title"
-        />
-      </label>
-      <button type="submit" disabled={!file || busy}>
-        {busy ? `${phase}…` : 'Upload'}
-      </button>
-      {phase === 'done' ? <p role="status">Uploaded. Processing will begin shortly.</p> : null}
-      {error ? <p role="alert">{error}</p> : null}
-    </form>
+    <section className="card">
+      <h2 className="card__title">Upload a PDF</h2>
+      <form onSubmit={onSubmit}>
+        <label className="field">
+          <span className="field__label">File</span>
+          <input
+            className="input"
+            type="file"
+            accept="application/pdf,.pdf"
+            onChange={onFileChange}
+            required
+          />
+        </label>
+        <label className="field">
+          <span className="field__label">Title</span>
+          <input
+            className="input"
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Document title"
+          />
+        </label>
+        <div className="form-actions">
+          <button type="submit" className="btn" disabled={!file || busy}>
+            {PHASE_COPY[phase]}
+          </button>
+          {phase === 'done' ? (
+            <span role="status" className="form-status form-status--success">
+              Uploaded. Processing will begin shortly.
+            </span>
+          ) : null}
+        </div>
+      </form>
+      {error ? (
+        <p role="alert" className="alert">
+          {error}
+        </p>
+      ) : null}
+    </section>
   );
 }

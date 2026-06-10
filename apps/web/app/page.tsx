@@ -3,6 +3,7 @@ import { headers } from 'next/headers';
 import Link from 'next/link';
 import type { components } from '@document-chat/contracts';
 import { getOptionalUser } from '../lib/auth';
+import { AppShell } from './app-shell';
 
 // The frontend consumes the OpenAPI contract: the response is typed by the
 // generated `VersionResponse` schema, so the page breaks at compile time if
@@ -31,52 +32,67 @@ export default async function Home() {
   const [version, user] = await Promise.all([getVersion(), getOptionalUser()]);
 
   return (
-    <main>
-      <h1>document-chat</h1>
-      <p>Public Apache 2.0 starter for a document Q&amp;A system.</p>
-
-      {user ? (
-        <div>
-          <span>Signed in as {user.email}</span>{' '}
-          <form action="/auth/signout" method="post" style={{ display: 'inline' }}>
-            <button type="submit">Sign out</button>
-          </form>
-          <p>
-            <Link href="/documents">Documents</Link> · <Link href="/chats">Chats</Link>
-          </p>
+    <AppShell user={user}>
+      <div className="page-header">
+        <div className="page-header__title">
+          <h1>document-chat</h1>
+          <p>Public Apache 2.0 starter for a document Q&amp;A system with traceable citations.</p>
         </div>
-      ) : (
-        <p>
-          <Link href="/login">Sign in</Link> · <Link href="/signup">Create account</Link>
-        </p>
-      )}
+        {user ? (
+          <div className="row">
+            <Link href="/documents" className="btn btn--secondary">
+              Documents
+            </Link>
+            <Link href="/chats" className="btn">
+              Start a chat
+            </Link>
+          </div>
+        ) : (
+          <div className="row">
+            <Link href="/login" className="btn btn--secondary">
+              Sign in
+            </Link>
+            <Link href="/signup" className="btn">
+              Create account
+            </Link>
+          </div>
+        )}
+      </div>
 
-      {version ? (
-        <dl>
-          <dt>API version</dt>
-          <dd>{version.api_version}</dd>
-          <dt>Spec version</dt>
-          <dd>{version.spec_version}</dd>
-          <dt>Environment</dt>
-          <dd>{version.environment}</dd>
-          {version.git_sha ? (
-            <>
-              <dt>Commit</dt>
-              <dd>
-                <code>{version.git_sha}</code>
-              </dd>
-            </>
-          ) : null}
-        </dl>
-      ) : (
-        <p>
-          Could not reach <code>/api/version</code>.
-        </p>
-      )}
+      <section className="card">
+        <h2 className="card__title">Build info</h2>
+        {version ? (
+          <dl className="kv">
+            <dt>API version</dt>
+            <dd>{version.api_version}</dd>
+            <dt>Spec version</dt>
+            <dd>{version.spec_version}</dd>
+            <dt>Environment</dt>
+            <dd>
+              <span className={`badge badge--${version.environment}`}>{version.environment}</span>
+            </dd>
+            {version.git_sha ? (
+              <>
+                <dt>Commit</dt>
+                <dd>
+                  <code>{version.git_sha.slice(0, 12)}</code>
+                </dd>
+              </>
+            ) : null}
+          </dl>
+        ) : (
+          <p className="muted">
+            Could not reach <code>/api/version</code>.
+          </p>
+        )}
+      </section>
 
-      <p>
-        Tier 0 endpoints: <code>/api/health</code>, <code>/api/version</code>.
-      </p>
-    </main>
+      <section className="card page-section">
+        <h2 className="card__title">Tier 0 endpoints</h2>
+        <p className="muted">
+          <code>/api/health</code> · <code>/api/version</code>
+        </p>
+      </section>
+    </AppShell>
   );
 }

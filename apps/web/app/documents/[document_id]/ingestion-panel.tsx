@@ -126,28 +126,42 @@ export function IngestionPanel({ documentId, initialState, initialError }: Inges
   }
 
   return (
-    <section data-testid="ingestion-panel">
-      <h2>Processing</h2>
-      <p>
-        <span data-testid="ingestion-state">{currentState}</span>
-        {currentError ? <span> — {currentError}</span> : null}
+    <section data-testid="ingestion-panel" className="card page-section">
+      <div className="row row--space-between">
+        <h2 className="card__title" style={{ margin: 0 }}>
+          Processing
+        </h2>
+        <button
+          type="button"
+          onClick={onReprocess}
+          disabled={reprocessing}
+          className="btn btn--secondary btn--sm"
+        >
+          {reprocessing ? 'Reprocessing…' : 'Reprocess'}
+        </button>
+      </div>
+      <p style={{ marginTop: '0.75rem' }}>
+        <span className={`badge badge--${currentState}`} data-testid="ingestion-state">
+          {currentState}
+        </span>
+        {currentError ? <span className="muted"> — {currentError}</span> : null}
       </p>
-      <button type="button" onClick={onReprocess} disabled={reprocessing}>
-        {reprocessing ? 'Reprocessing…' : 'Reprocess'}
-      </button>
-      {reprocessError ? <p role="alert">{reprocessError}</p> : null}
+      {reprocessError ? (
+        <p role="alert" className="alert">
+          {reprocessError}
+        </p>
+      ) : null}
       {events.length > 0 ? (
         <details>
-          <summary>{events.length} event{events.length === 1 ? '' : 's'}</summary>
-          <ol>
+          <summary>
+            {events.length} event{events.length === 1 ? '' : 's'}
+          </summary>
+          <ol className="event-log">
             {events.map((event) => (
               <li key={event.id}>
                 <code>{event.event}</code>
-                {event.to_state ? ` → ${event.to_state}` : ''}
-                <small>
-                  {' '}
-                  ({new Date(event.occurred_at).toLocaleTimeString()})
-                </small>
+                {event.to_state ? <span className="muted">→ {event.to_state}</span> : null}
+                <small>{new Date(event.occurred_at).toLocaleTimeString()}</small>
               </li>
             ))}
           </ol>

@@ -7,9 +7,20 @@ import { createBrowserSupabaseClient } from '../lib/supabase/client';
 
 type Mode = 'login' | 'signup';
 
-const COPY: Record<Mode, { heading: string; submit: string; altText: string; altHref: string; altLabel: string }> = {
+const COPY: Record<
+  Mode,
+  {
+    heading: string;
+    subtitle: string;
+    submit: string;
+    altText: string;
+    altHref: string;
+    altLabel: string;
+  }
+> = {
   login: {
     heading: 'Sign in',
+    subtitle: 'Welcome back. Continue where you left off.',
     submit: 'Sign in',
     altText: 'Need an account?',
     altHref: '/signup',
@@ -17,6 +28,7 @@ const COPY: Record<Mode, { heading: string; submit: string; altText: string; alt
   },
   signup: {
     heading: 'Create account',
+    subtitle: 'Spin up a workspace and upload your first document.',
     submit: 'Sign up',
     altText: 'Already have an account?',
     altHref: '/login',
@@ -67,43 +79,54 @@ export function AuthForm({ mode }: { mode: Mode }) {
   }
 
   return (
-    <main>
-      <h1>{copy.heading}</h1>
-      <form onSubmit={onSubmit}>
-        <label>
-          Email
-          <input
-            type="email"
-            name="email"
-            autoComplete="email"
-            required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
-        </label>
-        <label>
-          Password
-          <input
-            type="password"
-            name="password"
-            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-            required
-            minLength={6}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </label>
-        <button type="submit" disabled={pending}>
-          {pending ? '…' : copy.submit}
-        </button>
-      </form>
+    <div className="auth-shell">
+      <div className="auth-card">
+        <h1>{copy.heading}</h1>
+        <p className="auth-card__subtitle">{copy.subtitle}</p>
+        <form onSubmit={onSubmit}>
+          <label className="field">
+            <span className="field__label">Email</span>
+            <input
+              className="input"
+              type="email"
+              name="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field__label">Password</span>
+            <input
+              className="input"
+              type="password"
+              name="password"
+              autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+              required
+              minLength={6}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
+          <div className="form-actions">
+            <button type="submit" className="btn" disabled={pending} style={{ width: '100%' }}>
+              {pending ? '…' : copy.submit}
+            </button>
+          </div>
+        </form>
 
-      {error ? <p role="alert">{error}</p> : null}
-      {notice ? <p>{notice}</p> : null}
+        {error ? (
+          <p role="alert" className="alert">
+            {error}
+          </p>
+        ) : null}
+        {notice ? <p className="form-status">{notice}</p> : null}
 
-      <p>
-        {copy.altText} <Link href={copy.altHref}>{copy.altLabel}</Link>
-      </p>
-    </main>
+        <p className="auth-card__alt">
+          {copy.altText} <Link href={copy.altHref}>{copy.altLabel}</Link>
+        </p>
+      </div>
+    </div>
   );
 }

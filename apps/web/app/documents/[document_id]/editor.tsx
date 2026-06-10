@@ -75,20 +75,31 @@ export function DocumentEditor({ doc }: { doc: EditableDocument }) {
   }
 
   return (
-    <section>
-      <h2>Edit</h2>
+    <section className="card page-section">
+      <h2 className="card__title">Edit</h2>
       <form onSubmit={onSave}>
-        <label>
-          Title
-          <input value={title} onChange={(e) => setTitle(e.target.value)} required />
+        <label className="field">
+          <span className="field__label">Title</span>
+          <input
+            className="input"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            required
+          />
         </label>
-        <label>
-          Version
-          <input value={version} onChange={(e) => setVersion(e.target.value)} required />
+        <label className="field">
+          <span className="field__label">Version</span>
+          <input
+            className="input"
+            value={version}
+            onChange={(e) => setVersion(e.target.value)}
+            required
+          />
         </label>
-        <label>
-          Status
+        <label className="field">
+          <span className="field__label">Status</span>
           <select
+            className="select"
             value={status}
             onChange={(e) => setStatus(e.target.value as EditableDocument['status'])}
           >
@@ -99,25 +110,40 @@ export function DocumentEditor({ doc }: { doc: EditableDocument }) {
             ))}
           </select>
         </label>
-        <label>
-          Effective date
+        <label className="field">
+          <span className="field__label">Effective date</span>
           <input
+            className="input"
             type="date"
             value={effectiveDate}
             onChange={(e) => setEffectiveDate(e.target.value)}
           />
         </label>
-        <button type="submit" disabled={saving}>
-          {saving ? 'Saving…' : 'Save'}
-        </button>
-        {saved ? <span role="status"> Saved.</span> : null}
+        <div className="form-actions">
+          <button type="submit" className="btn" disabled={saving}>
+            {saving ? 'Saving…' : 'Save changes'}
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={onDelete}
+            disabled={deleting}
+          >
+            {deleting ? 'Deleting…' : 'Delete document'}
+          </button>
+          {saved ? (
+            <span role="status" className="form-status form-status--success">
+              Saved.
+            </span>
+          ) : null}
+        </div>
       </form>
 
-      <button type="button" onClick={onDelete} disabled={deleting}>
-        {deleting ? 'Deleting…' : 'Delete document'}
-      </button>
-
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? (
+        <p role="alert" className="alert">
+          {error}
+        </p>
+      ) : null}
     </section>
   );
 }

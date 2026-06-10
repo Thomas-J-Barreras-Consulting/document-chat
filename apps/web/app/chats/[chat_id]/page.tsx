@@ -8,6 +8,7 @@ import {
   listChatMessages,
 } from '../../../lib/chats-store';
 import { toContractMessage } from '../../../lib/chats';
+import { AppShell } from '../../app-shell';
 import { ChatClient } from './chat-client';
 
 export const dynamic = 'force-dynamic';
@@ -42,20 +43,22 @@ export default async function ChatPage({
   const { q } = await searchParams;
 
   return (
-    <main>
-      <h1>{chat.title}</h1>
+    <AppShell user={user}>
+      <div className="page-header">
+        <div className="page-header__title">
+          <h1>{chat.title}</h1>
+          <p className="subtle">Created {new Date(chat.created_at).toLocaleString()}</p>
+        </div>
+        <Link href="/chats" className="btn btn--ghost btn--sm">
+          ← All chats
+        </Link>
+      </div>
 
       <ChatClient
         chatId={chat_id}
         initialMessages={initialMessages}
-        // When `q` is present we just came from the new-chat composer:
-        // auto-stream the assistant turn for that already-persisted user message.
         autoSendContent={q ?? null}
       />
-
-      <p>
-        <Link href="/chats">Back to chats</Link>
-      </p>
-    </main>
+    </AppShell>
   );
 }

@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { getOptionalUser } from '../../lib/auth';
 import { listDocuments } from '../../lib/documents-store';
 import { DEFAULT_PAGE_LIMIT } from '../../lib/documents';
+import { AppShell } from '../app-shell';
 import { UploadForm } from './upload-form';
 
 export const dynamic = 'force-dynamic';
@@ -25,47 +26,56 @@ export default async function DocumentsPage({
   });
 
   return (
-    <main>
-      <h1>Documents</h1>
+    <AppShell user={user}>
+      <div className="page-header">
+        <div className="page-header__title">
+          <h1>Documents</h1>
+          <p>Upload PDFs and watch them flow through extraction, chunking, and embedding.</p>
+        </div>
+      </div>
 
       <UploadForm />
 
-      {items.length === 0 ? (
-        <p>No documents yet. Upload a PDF to get started.</p>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Title</th>
-              <th>Status</th>
-              <th>Processing</th>
-              <th>Uploaded</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((doc) => (
-              <tr key={doc.id}>
-                <td>
-                  <Link href={`/documents/${doc.id}`}>{doc.title}</Link>
-                </td>
-                <td>{doc.status}</td>
-                <td>{doc.ingestion_state}</td>
-                <td>{new Date(doc.created_at).toLocaleString()}</td>
+      <section className="page-section">
+        {items.length === 0 ? (
+          <div className="empty-state">No documents yet. Upload a PDF to get started.</div>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Processing</th>
+                <th>Uploaded</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+            </thead>
+            <tbody>
+              {items.map((doc) => (
+                <tr key={doc.id}>
+                  <td>
+                    <Link href={`/documents/${doc.id}`}>{doc.title}</Link>
+                  </td>
+                  <td>
+                    <span className={`badge badge--${doc.status}`}>{doc.status}</span>
+                  </td>
+                  <td>
+                    <span className={`badge badge--${doc.ingestion_state}`}>
+                      {doc.ingestion_state}
+                    </span>
+                  </td>
+                  <td className="subtle">{new Date(doc.created_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
 
       {nextCursor ? (
-        <p>
-          <Link href={`/documents?cursor=${encodeURIComponent(nextCursor)}`}>Next page</Link>
+        <p className="page-footer-links">
+          <Link href={`/documents?cursor=${encodeURIComponent(nextCursor)}`}>Next page →</Link>
         </p>
       ) : null}
-
-      <p>
-        <Link href="/chats">Chats</Link> · <Link href="/">Home</Link>
-      </p>
-    </main>
+    </AppShell>
   );
 }

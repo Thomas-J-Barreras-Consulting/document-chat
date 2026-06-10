@@ -8,8 +8,8 @@ export interface CitationChipProps {
 
 /**
  * Small inline button rendered in place of `[<chunk-uuid>]` markers. Plain
- * button + sup so the chip is keyboard-reachable and screenreaders announce
- * it as a reference link.
+ * button so the chip is keyboard-reachable and screenreaders announce it as
+ * a reference link.
  */
 export function CitationChip({ label, onClick }: CitationChipProps) {
   return (
@@ -17,18 +17,10 @@ export function CitationChip({ label, onClick }: CitationChipProps) {
       type="button"
       onClick={onClick}
       data-testid="citation-chip"
-      style={{
-        background: '#eef',
-        border: '1px solid #99c',
-        borderRadius: '0.25rem',
-        padding: '0 0.25rem',
-        fontSize: '0.8em',
-        cursor: 'pointer',
-        margin: '0 0.125rem',
-      }}
+      className="citation-chip"
       aria-label={`Open citation ${label}`}
     >
-      <sup>[{label}]</sup>
+      {label}
     </button>
   );
 }

@@ -84,56 +84,72 @@ export function ChatClient({ chatId, initialMessages, autoSendContent }: ChatCli
     });
   }
 
+  const showStreaming = stream.status === 'streaming' || stream.status === 'completed';
+
   return (
-    <div data-testid="chat-client">
-      <ol>
+    <div data-testid="chat-client" className="chat-layout">
+      <ol className="transcript">
         {messages.map((message) => (
-          <li key={message.id} data-role={message.role}>
-            <strong>{message.role}:</strong> <MessageBody message={message} onCite={setDrawerChunkId} />
+          <li key={message.id} className="message" data-role={message.role}>
+            <div className="message__bubble">
+              <span className="message__role">{message.role}</span>
+              <MessageBody message={message} onCite={setDrawerChunkId} />
+            </div>
           </li>
         ))}
-        {stream.status === 'streaming' || stream.status === 'completed' ? (
-          <li data-role="assistant" data-testid="streaming-message">
-            <strong>assistant:</strong>{' '}
-            <span data-testid="streaming-content">{stream.content || '…'}</span>
-            {stream.citations.length > 0 ? (
-              <span data-testid="streaming-citations">
-                {' '}
-                {stream.citations.map((citation, i) => (
-                  <CitationChip
-                    key={citation.id}
-                    label={String(i + 1)}
-                    onClick={() => setDrawerChunkId(citation.chunk_id)}
-                  />
-                ))}
+        {showStreaming ? (
+          <li className="message" data-role="assistant" data-testid="streaming-message">
+            <div className="message__bubble">
+              <span className="message__role">assistant</span>
+              <span
+                data-testid="streaming-content"
+                className={stream.status === 'streaming' ? 'streaming-cursor' : undefined}
+              >
+                {stream.content || '…'}
               </span>
-            ) : null}
+              {stream.citations.length > 0 ? (
+                <span data-testid="streaming-citations">
+                  {' '}
+                  {stream.citations.map((citation, i) => (
+                    <CitationChip
+                      key={citation.id}
+                      label={String(i + 1)}
+                      onClick={() => setDrawerChunkId(citation.chunk_id)}
+                    />
+                  ))}
+                </span>
+              ) : null}
+            </div>
           </li>
         ) : null}
         {stream.status === 'error' && stream.error ? (
-          <li data-role="error">
-            <strong>error:</strong> {stream.error.detail ?? stream.error.title}
+          <li className="message" data-role="error">
+            <div className="message__bubble">
+              <span className="message__role">error</span>
+              {stream.error.detail ?? stream.error.title}
+            </div>
           </li>
         ) : null}
       </ol>
 
-      <form onSubmit={onSubmit}>
-        <label>
-          Send a message
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            rows={3}
-            placeholder="Ask a follow-up…"
-            required
-          />
-        </label>
-        <button
-          type="submit"
-          disabled={stream.status === 'streaming' || draft.trim().length === 0}
-        >
-          {stream.status === 'streaming' ? 'Streaming…' : 'Send'}
-        </button>
+      <form onSubmit={onSubmit} className="composer" aria-label="Send a message">
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={3}
+          placeholder="Ask a follow-up…"
+          required
+          aria-label="Send a message"
+        />
+        <div className="composer__row">
+          <button
+            type="submit"
+            className="btn"
+            disabled={stream.status === 'streaming' || draft.trim().length === 0}
+          >
+            {stream.status === 'streaming' ? 'Streaming…' : 'Send'}
+          </button>
+        </div>
       </form>
 
       {drawerChunkId ? (
