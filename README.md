@@ -2,7 +2,7 @@
 
 **Upload your PDFs — contracts, reports, handbooks, policies — and ask questions in plain English. Every answer streams back in seconds with citations that link to the exact passage it came from, so you can trust it and verify it.**
 
-This is a production-grade Retrieval-Augmented Generation (RAG) application: a real, deployable product, not a toy demo. It handles messy real-world documents (including **scanned PDFs**, via OCR), remembers the conversation, and shows its sources.
+This is a production-grade Retrieval-Augmented Generation (RAG) application. It handles messy real-world documents (including **scanned PDFs**, via OCR), remembers the conversation, and shows its sources.
 
 ![Chat answer with inline citations linking back to the source documents](docs/screenshots/chat-with-references.png)
 
